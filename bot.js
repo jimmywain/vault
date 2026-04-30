@@ -331,10 +331,6 @@ async function postLeaksToChannel(channel, category, savedFiles, uploader) {
   for (const file of savedFiles) {
     try {
       const message = await channel.send({
-        content: [
-          `**13BPZ ${category.emoji} ${category.label} leak drop**`,
-          `Posted by **${uploader.tag}**`,
-        ].join("\n"),
         files: [new AttachmentBuilder(file.filePath, { name: file.originalName })],
       });
       sent.push(message.id);
