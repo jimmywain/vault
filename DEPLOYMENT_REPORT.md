@@ -219,7 +219,7 @@ npm start
 10. Check Railway logs. You want to see:
 
 ```txt
-Registered 14 guild slash commands
+Registered 16 guild slash commands
 13BPZ Vault online as [bot name]
 ```
 
@@ -242,8 +242,10 @@ Role: Leak Pings
 Category: 13 VAULT
 Category: BOOSTER LEAKS
 Channel: 💬 general-chat
-Channel: 📢 announcements
-Channel: 📜 rules
+Channel: 📢-announcements
+Channel: 📜-rules
+Channel: ✅-verify
+Channel: 🎉-giveaways
 All vault channels
 All booster channels
 All leak storage folders
@@ -309,12 +311,18 @@ Management:
 /deleteleak
 /renameleak
 /rules
+/verify
+/giveaway
 /cleanvaultchannels
 ```
 
-`/announce` creates/uses `📢 announcements` if you do not choose a channel.
+`/announce` creates/uses `📢-announcements` if you do not choose a channel.
 
-`/rules` creates/uses `📜 rules` if you do not choose a channel.
+`/rules` creates/uses `📜-rules` if you do not choose a channel.
+
+`/verify` creates/uses `✅-verify` and posts a button that gives users the `13 Vault` role.
+
+`/giveaway` creates/uses `🎉-giveaways` and starts a timed button giveaway. Duration examples: `10m`, `2h`, `1d`.
 
 Leak ping opt-in:
 

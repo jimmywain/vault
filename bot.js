@@ -3,6 +3,8 @@ require("dotenv").config();
 const {
   ActionRowBuilder,
   AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   Client,
   EmbedBuilder,
@@ -33,8 +35,10 @@ const NORMAL_ROLE = "13 Vault";
 const BOOSTER_ROLE = "Vault Booster";
 const LEAK_PINGS_ROLE = "Leak Pings";
 const GENERAL_CHAT = "💬 general-chat";
-const ANNOUNCEMENTS_CHANNEL = "📢 announcements";
-const RULES_CHANNEL = "📜 rules";
+const ANNOUNCEMENTS_CHANNEL = "📢-announcements";
+const RULES_CHANNEL = "📜-rules";
+const VERIFY_CHANNEL = "✅-verify";
+const GIVEAWAY_CHANNEL = "🎉-giveaways";
 
 const normalCategories = [
   { key: "ticket-0027", label: "ticket-0027", channel: "📢 ticket-0027", emoji: "📢" },
@@ -84,6 +88,24 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_leaks_category_created ON leaks(category, created_at);
+
+  CREATE TABLE IF NOT EXISTS giveaways (
+    message_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    prize TEXT NOT NULL,
+    winner_count INTEGER NOT NULL,
+    ends_at INTEGER NOT NULL,
+    ended INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS giveaway_entries (
+    message_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (message_id, user_id)
+  );
 `);
 
 const insertLeak = db.prepare(`
@@ -99,6 +121,19 @@ const latestLeaks = db.prepare("SELECT * FROM leaks ORDER BY created_at DESC LIM
 const getLeakById = db.prepare("SELECT * FROM leaks WHERE id = ?");
 const deleteLeakById = db.prepare("DELETE FROM leaks WHERE id = ?");
 const renameLeakById = db.prepare("UPDATE leaks SET original_name = @name WHERE id = @id");
+const insertGiveaway = db.prepare(`
+  INSERT INTO giveaways (message_id, channel_id, prize, winner_count, ends_at, created_by, created_at)
+  VALUES (@messageId, @channelId, @prize, @winnerCount, @endsAt, @createdBy, @createdAt)
+`);
+const getGiveaway = db.prepare("SELECT * FROM giveaways WHERE message_id = ?");
+const getOpenGiveaways = db.prepare("SELECT * FROM giveaways WHERE ended = 0");
+const endGiveawayById = db.prepare("UPDATE giveaways SET ended = 1 WHERE message_id = ?");
+const insertGiveawayEntry = db.prepare(`
+  INSERT OR IGNORE INTO giveaway_entries (message_id, user_id, created_at)
+  VALUES (?, ?, ?)
+`);
+const countGiveawayEntries = db.prepare("SELECT COUNT(*) AS count FROM giveaway_entries WHERE message_id = ?");
+const getGiveawayEntries = db.prepare("SELECT user_id FROM giveaway_entries WHERE message_id = ?");
 
 const client = new Client({
   intents: [
@@ -131,6 +166,21 @@ function formatBytes(bytes) {
 function formatLeakRow(row) {
   const category = categoryByKey.get(row.category);
   return `#${row.id} | ${category?.emoji || "📁"} **${category?.label || row.category}** | ${row.original_name} | ${formatBytes(row.size)}`;
+}
+
+function parseDuration(text) {
+  const match = /^(\d+)(m|h|d)$/i.exec(text.trim());
+  if (!match) return null;
+
+  const value = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const multipliers = {
+    m: 60 * 1000,
+    h: 60 * 60 * 1000,
+    d: 24 * 60 * 60 * 1000,
+  };
+
+  return value * multipliers[unit];
 }
 
 function cleanFileName(name) {
@@ -172,11 +222,13 @@ async function findOrCreateCategory(guild, name, overwrites, reason) {
 }
 
 async function findOrCreateTextChannel(guild, parent, name, overwrites, reason) {
+  await guild.channels.fetch();
+
   let channel = guild.channels.cache.find(
     (guildChannel) =>
       guildChannel.type === ChannelType.GuildText &&
       guildChannel.parentId === (parent?.id || null) &&
-      guildChannel.name === name,
+      normalizedDiscordName(guildChannel.name) === normalizedDiscordName(name),
   );
 
   if (!channel) {
@@ -613,7 +665,8 @@ async function clearMessages(interaction) {
 
   const amount = interaction.options.getInteger("amount", true);
   const channel = interaction.options.getChannel("channel") ||
-    await findOrCreateInfoChannel(interaction.guild, RULES_CHANNEL, "13BPZ Vault rules channel");
+    findGeneralChannel(interaction.guild) ||
+    interaction.channel;
 
   if (channel.type !== ChannelType.GuildText) {
     await interaction.editReply({ embeds: [brandEmbed("Bad Channel", "Pick a normal text channel.")] });
@@ -735,7 +788,8 @@ async function postRules(interaction) {
     return;
   }
 
-  const channel = interaction.options.getChannel("channel") || findGeneralChannel(interaction.guild) || interaction.channel;
+  const channel = interaction.options.getChannel("channel") ||
+    await findOrCreateInfoChannel(interaction.guild, RULES_CHANNEL, "13BPZ Vault rules channel");
   if (channel.type !== ChannelType.GuildText) {
     await interaction.editReply({ embeds: [brandEmbed("Bad Channel", "Pick a normal text channel.")] });
     return;
@@ -804,6 +858,205 @@ async function postToGeneral(guild, embed) {
   if (!channel) return false;
   await channel.send({ embeds: [embed] });
   return true;
+}
+
+async function postVerify(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only.")] });
+    return;
+  }
+
+  await findOrCreateRole(interaction.guild, NORMAL_ROLE, 0x2b2d31, "13BPZ Vault verify setup");
+  const channel = interaction.options.getChannel("channel") ||
+    await findOrCreateInfoChannel(interaction.guild, VERIFY_CHANNEL, "13BPZ Vault verify channel");
+  const button = new ButtonBuilder()
+    .setCustomId("verify:13vault")
+    .setLabel("Verify")
+    .setStyle(ButtonStyle.Danger);
+
+  await channel.send({
+    embeds: [
+      brandEmbed(
+        "Verify",
+        `Press the button below to unlock **${NORMAL_ROLE}**.`,
+      ),
+    ],
+    components: [new ActionRowBuilder().addComponents(button)],
+  });
+
+  await interaction.editReply({ embeds: [brandEmbed("Verify Posted", `Verify panel posted in ${channel}.`)] });
+}
+
+async function handleVerifyButton(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const role = await findOrCreateRole(interaction.guild, NORMAL_ROLE, 0x2b2d31, "13BPZ Vault verify role");
+  if (interaction.member.roles.cache.has(role.id)) {
+    await interaction.editReply({ embeds: [brandEmbed("Already Verified", `You already have **${NORMAL_ROLE}**.`)] });
+    return;
+  }
+
+  await interaction.member.roles.add(role, "13BPZ Vault verify button");
+  await interaction.editReply({ embeds: [brandEmbed("Verified", `Unlocked **${NORMAL_ROLE}**.`)] });
+}
+
+function giveawayEmbed(giveaway, entryCount = 0) {
+  const winnerCount = giveaway.winner_count ?? giveaway.winnerCount;
+  const endsAt = giveaway.ends_at ?? giveaway.endsAt;
+
+  return brandEmbed(
+    "Giveaway",
+    [
+      `Prize: **${giveaway.prize}**`,
+      `Winners: **${winnerCount}**`,
+      `Ends: <t:${Math.floor(endsAt / 1000)}:R>`,
+      `Entries: **${entryCount}**`,
+      "",
+      "Press the button below to enter.",
+    ].join("\n"),
+  );
+}
+
+async function createGiveaway(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only.")] });
+    return;
+  }
+
+  const prize = interaction.options.getString("prize", true);
+  const durationText = interaction.options.getString("duration", true);
+  const winnerCount = interaction.options.getInteger("winners") || 1;
+  const durationMs = parseDuration(durationText);
+
+  if (!durationMs) {
+    await interaction.editReply({ embeds: [brandEmbed("Bad Duration", "Use a duration like `10m`, `2h`, or `1d`.")] });
+    return;
+  }
+
+  const channel = interaction.options.getChannel("channel") ||
+    await findOrCreateInfoChannel(interaction.guild, GIVEAWAY_CHANNEL, "13BPZ Vault giveaway channel");
+  const endsAt = Date.now() + durationMs;
+  const button = new ButtonBuilder()
+    .setCustomId("giveaway:enter")
+    .setLabel("Enter Giveaway")
+    .setStyle(ButtonStyle.Success);
+
+  const message = await channel.send({
+    embeds: [giveawayEmbed({ prize, winnerCount, ends_at: endsAt }, 0)],
+    components: [new ActionRowBuilder().addComponents(button)],
+  });
+
+  insertGiveaway.run({
+    messageId: message.id,
+    channelId: channel.id,
+    prize,
+    winnerCount,
+    endsAt,
+    createdBy: interaction.user.id,
+    createdAt: Date.now(),
+  });
+
+  scheduleGiveawayEnd(message.id, Math.max(1000, endsAt - Date.now()));
+  await interaction.editReply({ embeds: [brandEmbed("Giveaway Started", `Posted in ${channel} for **${prize}**.`)] });
+}
+
+async function handleGiveawayButton(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const giveaway = getGiveaway.get(interaction.message.id);
+  if (!giveaway || giveaway.ended) {
+    await interaction.editReply({ embeds: [brandEmbed("Giveaway Closed", "This giveaway is already closed.")] });
+    return;
+  }
+
+  if (Date.now() >= giveaway.ends_at) {
+    await endGiveaway(giveaway.message_id);
+    await interaction.editReply({ embeds: [brandEmbed("Giveaway Closed", "This giveaway just ended.")] });
+    return;
+  }
+
+  const result = insertGiveawayEntry.run(giveaway.message_id, interaction.user.id, Date.now());
+  const entryCount = countGiveawayEntries.get(giveaway.message_id).count;
+
+  await interaction.message.edit({
+    embeds: [giveawayEmbed(giveaway, entryCount)],
+  }).catch(console.error);
+
+  await interaction.editReply({
+    embeds: [brandEmbed(result.changes ? "Entered" : "Already Entered", result.changes ? `You entered **${giveaway.prize}**.` : "You are already entered.")],
+  });
+}
+
+async function endGiveaway(messageId) {
+  const giveaway = getGiveaway.get(messageId);
+  if (!giveaway || giveaway.ended) return;
+
+  const channel = await client.channels.fetch(giveaway.channel_id).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    endGiveawayById.run(messageId);
+    return;
+  }
+
+  const entries = getGiveawayEntries.all(messageId).map((row) => row.user_id);
+  const winners = [...entries].sort(() => Math.random() - 0.5).slice(0, giveaway.winner_count);
+  const entryCount = entries.length;
+  const message = await channel.messages.fetch(messageId).catch(() => null);
+  const endedButton = new ButtonBuilder()
+    .setCustomId("giveaway:ended")
+    .setLabel("Giveaway Ended")
+    .setStyle(ButtonStyle.Secondary)
+    .setDisabled(true);
+
+  if (message) {
+    await message.edit({
+      embeds: [
+        brandEmbed(
+          "Giveaway Ended",
+          [
+            `Prize: **${giveaway.prize}**`,
+            `Entries: **${entryCount}**`,
+            winners.length ? `Winner${winners.length === 1 ? "" : "s"}: ${winners.map((id) => `<@${id}>`).join(", ")}` : "No valid entries.",
+          ].join("\n"),
+        ),
+      ],
+      components: [new ActionRowBuilder().addComponents(endedButton)],
+    }).catch(console.error);
+  }
+
+  await channel.send({
+    embeds: [
+      brandEmbed(
+        "Giveaway Result",
+        winners.length
+          ? `**${giveaway.prize}** winner${winners.length === 1 ? "" : "s"}: ${winners.map((id) => `<@${id}>`).join(", ")}`
+          : `**${giveaway.prize}** ended with no entries.`,
+      ),
+    ],
+  }).catch(console.error);
+
+  endGiveawayById.run(messageId);
+}
+
+function scheduleGiveawayEnd(messageId, delayMs) {
+  const maxDelay = 2_147_483_647;
+  setTimeout(() => {
+    if (delayMs > maxDelay) {
+      scheduleGiveawayEnd(messageId, delayMs - maxDelay);
+      return;
+    }
+    endGiveaway(messageId).catch(console.error);
+  }, Math.min(delayMs, maxDelay));
+}
+
+function scheduleOpenGiveaways() {
+  const giveaways = getOpenGiveaways.all();
+  for (const giveaway of giveaways) {
+    scheduleGiveawayEnd(giveaway.message_id, Math.max(1000, giveaway.ends_at - Date.now()));
+  }
 }
 
 async function showVaultMenu(interaction, type) {
@@ -1018,6 +1271,45 @@ function buildCommands() {
           .addChannelTypes(ChannelType.GuildText),
       ),
     new SlashCommandBuilder()
+      .setName("verify")
+      .setDescription("Owner only: create/use verify and post the verify button.")
+      .addChannelOption((option) =>
+        option
+          .setName("channel")
+          .setDescription("Optional channel, defaults to/create verify")
+          .addChannelTypes(ChannelType.GuildText),
+      ),
+    new SlashCommandBuilder()
+      .setName("giveaway")
+      .setDescription("Owner only: create/use giveaways and start a button giveaway.")
+      .addStringOption((option) =>
+        option
+          .setName("prize")
+          .setDescription("Giveaway prize")
+          .setRequired(true)
+          .setMaxLength(200),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("duration")
+          .setDescription("Duration like 10m, 2h, or 1d")
+          .setRequired(true)
+          .setMaxLength(12),
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("winners")
+          .setDescription("Number of winners")
+          .setMinValue(1)
+          .setMaxValue(10),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("channel")
+          .setDescription("Optional channel, defaults to/create giveaways")
+          .addChannelTypes(ChannelType.GuildText),
+      ),
+    new SlashCommandBuilder()
       .setName("cleanvaultchannels")
       .setDescription("Owner/mod: remove user messages from leak channels and keep bot leak posts."),
     addLeakCommand,
@@ -1048,6 +1340,7 @@ client.once("ready", async () => {
   await ensureDir(LEAKS_DIR);
   for (const category of allCategories) await ensureDir(path.join(LEAKS_DIR, category.key));
   await registerCommands();
+  scheduleOpenGiveaways();
   console.log(`13BPZ Vault online as ${client.user.tag}`);
 });
 
@@ -1097,6 +1390,8 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.commandName === "renameleak") return await renameLeak(interaction);
       if (interaction.commandName === "leakping") return await toggleLeakPing(interaction);
       if (interaction.commandName === "rules") return await postRules(interaction);
+      if (interaction.commandName === "verify") return await postVerify(interaction);
+      if (interaction.commandName === "giveaway") return await createGiveaway(interaction);
       if (interaction.commandName === "cleanvaultchannels") return await cleanVaultChannels(interaction);
       if (interaction.commandName === "addleak") return await addLeak(interaction);
       if (interaction.commandName === "vault") return await showVaultMenu(interaction, "normal");
@@ -1105,6 +1400,14 @@ client.on("interactionCreate", async (interaction) => {
 
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("vault:")) {
       return await sendVaultFiles(interaction);
+    }
+
+    if (interaction.isButton() && interaction.customId === "verify:13vault") {
+      return await handleVerifyButton(interaction);
+    }
+
+    if (interaction.isButton() && interaction.customId === "giveaway:enter") {
+      return await handleGiveawayButton(interaction);
     }
   } catch (error) {
     console.error(error);
