@@ -242,6 +242,8 @@ Role: Leak Pings
 Category: 13 VAULT
 Category: BOOSTER LEAKS
 Channel: 💬 general-chat
+Channel: 📢 announcements
+Channel: 📜 rules
 All vault channels
 All booster channels
 All leak storage folders
@@ -309,6 +311,10 @@ Management:
 /rules
 /cleanvaultchannels
 ```
+
+`/announce` creates/uses `📢 announcements` if you do not choose a channel.
+
+`/rules` creates/uses `📜 rules` if you do not choose a channel.
 
 Leak ping opt-in:
 

@@ -33,6 +33,8 @@ const NORMAL_ROLE = "13 Vault";
 const BOOSTER_ROLE = "Vault Booster";
 const LEAK_PINGS_ROLE = "Leak Pings";
 const GENERAL_CHAT = "💬 general-chat";
+const ANNOUNCEMENTS_CHANNEL = "📢 announcements";
+const RULES_CHANNEL = "📜 rules";
 
 const normalCategories = [
   { key: "ticket-0027", label: "ticket-0027", channel: "📢 ticket-0027", emoji: "📢" },
@@ -190,6 +192,34 @@ async function findOrCreateTextChannel(guild, parent, name, overwrites, reason) 
   }
 
   return channel;
+}
+
+async function findOrCreateInfoChannel(guild, name, reason) {
+  const overwrites = [
+    {
+      id: guild.roles.everyone.id,
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory],
+      deny: [
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.SendMessagesInThreads,
+        PermissionFlagsBits.CreatePublicThreads,
+        PermissionFlagsBits.CreatePrivateThreads,
+        PermissionFlagsBits.AddReactions,
+      ],
+    },
+    {
+      id: guild.members.me.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ManageChannels,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+      ],
+    },
+  ];
+
+  return findOrCreateTextChannel(guild, null, name, overwrites, reason);
 }
 
 async function lockTextChannelsExceptGeneral(guild, generalChannel, vaultRole, boosterRole) {
@@ -553,7 +583,8 @@ async function announce(interaction) {
     return;
   }
 
-  const channel = interaction.options.getChannel("channel", true);
+  const channel = interaction.options.getChannel("channel") ||
+    await findOrCreateInfoChannel(interaction.guild, ANNOUNCEMENTS_CHANNEL, "13BPZ Vault announcement channel");
   const title = interaction.options.getString("title", true);
   const message = interaction.options.getString("message", true);
 
@@ -581,7 +612,8 @@ async function clearMessages(interaction) {
   }
 
   const amount = interaction.options.getInteger("amount", true);
-  const channel = interaction.options.getChannel("channel") || findGeneralChannel(interaction.guild) || interaction.channel;
+  const channel = interaction.options.getChannel("channel") ||
+    await findOrCreateInfoChannel(interaction.guild, RULES_CHANNEL, "13BPZ Vault rules channel");
 
   if (channel.type !== ChannelType.GuildText) {
     await interaction.editReply({ embeds: [brandEmbed("Bad Channel", "Pick a normal text channel.")] });
@@ -895,14 +927,7 @@ function buildCommands() {
       .setDescription("Owner only: make every text channel read-only except general chat."),
     new SlashCommandBuilder()
       .setName("announce")
-      .setDescription("Owner only: post a clean 13BPZ announcement embed.")
-      .addChannelOption((option) =>
-        option
-          .setName("channel")
-          .setDescription("Channel to post in")
-          .addChannelTypes(ChannelType.GuildText)
-          .setRequired(true),
-      )
+      .setDescription("Owner only: create/use announcements and post a clean embed.")
       .addStringOption((option) =>
         option
           .setName("title")
@@ -916,6 +941,12 @@ function buildCommands() {
           .setDescription("Announcement message")
           .setRequired(true)
           .setMaxLength(2000),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("channel")
+          .setDescription("Optional channel, defaults to/create announcements")
+          .addChannelTypes(ChannelType.GuildText),
       ),
     new SlashCommandBuilder()
       .setName("clear")
@@ -979,11 +1010,11 @@ function buildCommands() {
       .setDescription("Toggle the Leak Pings role for new leak alerts."),
     new SlashCommandBuilder()
       .setName("rules")
-      .setDescription("Owner only: post the 13BPZ rules embed.")
+      .setDescription("Owner only: create/use rules and post the 13BPZ rules embed.")
       .addChannelOption((option) =>
         option
           .setName("channel")
-          .setDescription("Optional rules channel, defaults to general chat")
+          .setDescription("Optional channel, defaults to/create rules")
           .addChannelTypes(ChannelType.GuildText),
       ),
     new SlashCommandBuilder()
