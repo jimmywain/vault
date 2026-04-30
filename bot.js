@@ -31,6 +31,7 @@ const LEAKS_DIR = path.join(ROOT, "leaks");
 const DB_PATH = path.join(ROOT, "vault.sqlite");
 const NORMAL_ROLE = "13 Vault";
 const BOOSTER_ROLE = "Vault Booster";
+const GENERAL_CHAT = "💬 general-chat";
 
 const normalCategories = [
   { key: "ticket-0027", label: "ticket-0027", channel: "📢 ticket-0027", emoji: "📢" },
@@ -147,7 +148,7 @@ async function findOrCreateTextChannel(guild, parent, name, overwrites, reason) 
   let channel = guild.channels.cache.find(
     (guildChannel) =>
       guildChannel.type === ChannelType.GuildText &&
-      guildChannel.parentId === parent.id &&
+      guildChannel.parentId === (parent?.id || null) &&
       guildChannel.name === name,
   );
 
@@ -155,7 +156,7 @@ async function findOrCreateTextChannel(guild, parent, name, overwrites, reason) 
     channel = await guild.channels.create({
       name,
       type: ChannelType.GuildText,
-      parent,
+      parent: parent || undefined,
       permissionOverwrites: overwrites,
       reason,
     });
@@ -164,6 +165,49 @@ async function findOrCreateTextChannel(guild, parent, name, overwrites, reason) 
   }
 
   return channel;
+}
+
+async function lockTextChannelsExceptGeneral(guild, generalChannel, vaultRole, boosterRole) {
+  await guild.channels.fetch();
+
+  const channels = guild.channels.cache.filter(
+    (channel) => channel.type === ChannelType.GuildText && channel.id !== generalChannel.id,
+  );
+
+  for (const channel of channels.values()) {
+    await channel.permissionOverwrites.edit(guild.roles.everyone, {
+      SendMessages: false,
+      SendMessagesInThreads: false,
+      CreatePublicThreads: false,
+      CreatePrivateThreads: false,
+      AddReactions: false,
+    }, { reason: "13BPZ Vault setup: read-only outside general chat" });
+
+    await channel.permissionOverwrites.edit(vaultRole, {
+      SendMessages: false,
+      SendMessagesInThreads: false,
+      CreatePublicThreads: false,
+      CreatePrivateThreads: false,
+      AddReactions: false,
+    }, { reason: "13BPZ Vault setup: read-only outside general chat" });
+
+    await channel.permissionOverwrites.edit(boosterRole, {
+      SendMessages: false,
+      SendMessagesInThreads: false,
+      CreatePublicThreads: false,
+      CreatePrivateThreads: false,
+      AddReactions: false,
+    }, { reason: "13BPZ Vault setup: read-only outside general chat" });
+
+    await channel.permissionOverwrites.edit(guild.members.me, {
+      ViewChannel: true,
+      SendMessages: true,
+      AttachFiles: true,
+      ReadMessageHistory: true,
+    }, { reason: "13BPZ Vault setup: bot can post leaks" });
+  }
+
+  return channels.size;
 }
 
 async function addRoleIfPossible(member, roleName) {
@@ -226,19 +270,27 @@ async function runSetup(interaction) {
   const boosterRole = await findOrCreateRole(guild, BOOSTER_ROLE, 0xff3b3b, "13BPZ Vault setup");
 
   const normalOverwrites = [
-    { id: everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-    { id: vaultRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] },
+    { id: everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads, PermissionFlagsBits.AddReactions] },
+    { id: vaultRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads, PermissionFlagsBits.AddReactions] },
     { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
   ];
 
   const boosterOverwrites = [
-    { id: everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-    { id: boosterRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] },
+    { id: everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads, PermissionFlagsBits.AddReactions] },
+    { id: boosterRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads, PermissionFlagsBits.AddReactions] },
     { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
+  ];
+
+  const generalOverwrites = [
+    { id: everyone.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads] },
+    { id: vaultRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    { id: boosterRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles, PermissionFlagsBits.ReadMessageHistory] },
   ];
 
   const normalCategory = await findOrCreateCategory(guild, "13 VAULT", normalOverwrites, "13BPZ Vault setup");
   const boosterCategory = await findOrCreateCategory(guild, "BOOSTER LEAKS", boosterOverwrites, "13BPZ Vault setup");
+  const generalChannel = await findOrCreateTextChannel(guild, null, GENERAL_CHAT, generalOverwrites, "13BPZ Vault setup");
 
   for (const category of normalCategories) {
     await findOrCreateTextChannel(guild, normalCategory, category.channel, normalOverwrites, "13BPZ Vault setup");
@@ -250,6 +302,8 @@ async function runSetup(interaction) {
     await ensureDir(path.join(LEAKS_DIR, category.key));
   }
 
+  const lockedChannels = await lockTextChannelsExceptGeneral(guild, generalChannel, vaultRole, boosterRole);
+
   await interaction.editReply({
     embeds: [
       brandEmbed(
@@ -257,7 +311,44 @@ async function runSetup(interaction) {
         [
           `Created or verified roles: **${NORMAL_ROLE}**, **${BOOSTER_ROLE}**`,
           "Created or verified categories: **13 VAULT**, **BOOSTER LEAKS**",
+          `General chat: ${generalChannel}`,
+          `Locked messaging in **${lockedChannels}** text channels outside general chat.`,
           `Prepared **${normalCategories.length + boosterCategories.length}** leak folders.`,
+        ].join("\n"),
+      ),
+    ],
+  });
+}
+
+async function runLockChannels(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only. Channel locks are not for random hands.")] });
+    return;
+  }
+
+  const { guild } = interaction;
+  const vaultRole = await findOrCreateRole(guild, NORMAL_ROLE, 0x2b2d31, "13BPZ Vault channel lock");
+  const boosterRole = await findOrCreateRole(guild, BOOSTER_ROLE, 0xff3b3b, "13BPZ Vault channel lock");
+  const generalOverwrites = [
+    { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads] },
+    { id: vaultRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    { id: boosterRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles, PermissionFlagsBits.ReadMessageHistory] },
+  ];
+
+  const generalChannel = await findOrCreateTextChannel(guild, null, GENERAL_CHAT, generalOverwrites, "13BPZ Vault channel lock");
+  const lockedChannels = await lockTextChannelsExceptGeneral(guild, generalChannel, vaultRole, boosterRole);
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "Channels Locked",
+        [
+          `General chat: ${generalChannel}`,
+          `Locked messaging in **${lockedChannels}** text channels outside general chat.`,
+          "Users can chat in general only. The bot can still post leaks in vault channels.",
         ].join("\n"),
       ),
     ],
@@ -530,6 +621,9 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName("setup")
       .setDescription("Owner only: create 13BPZ Vault roles, categories, and channels."),
+    new SlashCommandBuilder()
+      .setName("lockchannels")
+      .setDescription("Owner only: make every text channel read-only except general chat."),
     addLeakCommand,
     new SlashCommandBuilder()
       .setName("vault")
@@ -584,6 +678,7 @@ client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === "setup") return await runSetup(interaction);
+      if (interaction.commandName === "lockchannels") return await runLockChannels(interaction);
       if (interaction.commandName === "addleak") return await addLeak(interaction);
       if (interaction.commandName === "vault") return await showVaultMenu(interaction, "normal");
       if (interaction.commandName === "boostervault") return await showVaultMenu(interaction, "booster");

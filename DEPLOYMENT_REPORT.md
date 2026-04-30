@@ -219,7 +219,7 @@ npm start
 10. Check Railway logs. You want to see:
 
 ```txt
-Registered 4 guild slash commands
+Registered 5 guild slash commands
 13BPZ Vault online as [bot name]
 ```
 
@@ -240,10 +240,21 @@ Role: 13 Vault
 Role: Vault Booster
 Category: 13 VAULT
 Category: BOOSTER LEAKS
+Channel: 💬 general-chat
 All vault channels
 All booster channels
 All leak storage folders
 ```
+
+`/setup` also makes leak channels read-only for normal members. Users can talk in `💬 general-chat`; the bot can still post leaks in the vault channels.
+
+If the server is already set up and you only want to apply the chat lock, use:
+
+```txt
+/lockchannels
+```
+
+This does not recreate all vault channels. It only creates/refreshes `💬 general-chat` and makes every other text channel read-only for normal members.
 
 ## Adding Leaks
 
