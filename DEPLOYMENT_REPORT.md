@@ -267,6 +267,22 @@ And tracks them in:
 vault.sqlite
 ```
 
+The bot also posts the attached files/videos as a normal message in the matching Discord channel.
+
+Example:
+
+```txt
+/addleak category: reshades
+```
+
+The bot posts the uploaded leak files in:
+
+```txt
+🌫️ reshades
+```
+
+Only the owner can use `/addleak`. Regular users can see the posted leak only if they have permission to view that Discord channel.
+
 ## User Commands
 
 Normal vault:
@@ -324,4 +340,3 @@ Before going live:
 [ ] Test /vault
 [ ] Test /boostervault
 ```
-

@@ -308,6 +308,7 @@ async function postLeaksToChannel(channel, category, savedFiles, uploader) {
 
     try {
       const message = await channel.send({
+        content: `13BPZ drop ${Math.floor(index / 10) + 1}/${Math.ceil(savedFiles.length / 10)} for **${category.label}**`,
         embeds: [
           brandEmbed(
             "New Leak Drop",
