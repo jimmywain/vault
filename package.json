@@ -1,0 +1,17 @@
+{
+  "name": "13bpz-vault-bot",
+  "version": "1.0.0",
+  "description": "Production-ready Discord vault bot for 13BPZ Vault.",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7"
+  }
+}
