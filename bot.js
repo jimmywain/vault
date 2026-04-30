@@ -159,6 +159,8 @@ async function findOrCreateTextChannel(guild, parent, name, overwrites, reason) 
       permissionOverwrites: overwrites,
       reason,
     });
+  } else {
+    await channel.permissionOverwrites.set(overwrites, reason);
   }
 
   return channel;
@@ -179,6 +181,37 @@ function hasRole(member, roleName) {
   return member.roles.cache.some((role) => role.name === roleName);
 }
 
+function normalizedDiscordName(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function categoryParentName(categoryKey) {
+  return boosterCategories.some((category) => category.key === categoryKey) ? "BOOSTER LEAKS" : "13 VAULT";
+}
+
+async function findLeakPostChannel(guild, category) {
+  await guild.channels.fetch();
+
+  const parentName = categoryParentName(category.key);
+  const parent = guild.channels.cache.find(
+    (channel) => channel.type === ChannelType.GuildCategory && channel.name === parentName,
+  );
+
+  const wantedNames = new Set([
+    normalizedDiscordName(category.channel),
+    normalizedDiscordName(category.label),
+    normalizedDiscordName(category.key),
+  ]);
+
+  return guild.channels.cache.find((channel) => {
+    if (channel.type !== ChannelType.GuildText) return false;
+    if (parent && channel.parentId !== parent.id) return false;
+
+    const channelName = normalizedDiscordName(channel.name);
+    return wantedNames.has(channelName) || channelName.endsWith(normalizedDiscordName(category.label));
+  });
+}
+
 async function runSetup(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
@@ -195,13 +228,13 @@ async function runSetup(interaction) {
   const normalOverwrites = [
     { id: everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: vaultRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] },
-    { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels] },
+    { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
   ];
 
   const boosterOverwrites = [
     { id: everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: boosterRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] },
-    { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels] },
+    { id: guild.members.me.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
   ];
 
   const normalCategory = await findOrCreateCategory(guild, "13 VAULT", normalOverwrites, "13BPZ Vault setup");
@@ -258,7 +291,43 @@ async function downloadAttachment(attachment, categoryKey, uploaderId) {
     createdAt: timestamp,
   });
 
-  return storedName;
+  return {
+    originalName: attachment.name || "leak.bin",
+    storedName,
+    filePath,
+  };
+}
+
+async function postLeaksToChannel(channel, category, savedFiles, uploader) {
+  const sent = [];
+  const failed = [];
+
+  for (let index = 0; index < savedFiles.length; index += 10) {
+    const chunk = savedFiles.slice(index, index + 10);
+    const files = chunk.map((file) => new AttachmentBuilder(file.filePath, { name: file.originalName }));
+
+    try {
+      const message = await channel.send({
+        embeds: [
+          brandEmbed(
+            "New Leak Drop",
+            [
+              `Category: **${category.emoji} ${category.label}**`,
+              `Files: **${chunk.length}**`,
+              `Added by: **${uploader.tag}**`,
+            ].join("\n"),
+          ),
+        ],
+        files,
+      });
+      sent.push(message.id);
+    } catch (error) {
+      console.error(`Failed to post leaks to #${channel.name}:`, error);
+      failed.push(...chunk.map((file) => `${file.originalName}: ${error.message}`));
+    }
+  }
+
+  return { sentCount: sent.length, failedCount: failed.length };
 }
 
 async function addLeak(interaction) {
@@ -299,6 +368,19 @@ async function addLeak(interaction) {
     }
   }
 
+  let postedText = "Posted to channel: **No**";
+  if (saved.length) {
+    const targetChannel = await findLeakPostChannel(interaction.guild, category);
+
+    if (targetChannel) {
+      const posted = await postLeaksToChannel(targetChannel, category, saved, interaction.user);
+      postedText = `Posted to channel: ${targetChannel} (**${posted.sentCount}** message${posted.sentCount === 1 ? "" : "s"})`;
+      if (posted.failedCount) postedText += `\nChannel post failures: **${posted.failedCount}** file${posted.failedCount === 1 ? "" : "s"}`;
+    } else {
+      postedText = `Posted to channel: **No**\nCould not find the matching Discord channel. Run **/setup** again or check the channel name: **${category.channel}**`;
+    }
+  }
+
   await interaction.editReply({
     embeds: [
       brandEmbed(
@@ -306,6 +388,7 @@ async function addLeak(interaction) {
         [
           `Category: **${category.emoji} ${category.label}**`,
           `Files saved: **${saved.length}**`,
+          postedText,
           failed.length ? `Failed: **${failed.length}**` : "Failed: **0**",
         ].join("\n"),
       ),
