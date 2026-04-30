@@ -295,40 +295,60 @@ async function downloadAttachment(attachment, categoryKey, uploaderId) {
     originalName: attachment.name || "leak.bin",
     storedName,
     filePath,
+    size: attachment.size || bytes.length,
   };
 }
 
 async function postLeaksToChannel(channel, category, savedFiles, uploader) {
   const sent = [];
   const failed = [];
+  const permissions = channel.permissionsFor(channel.guild.members.me);
 
-  for (let index = 0; index < savedFiles.length; index += 10) {
-    const chunk = savedFiles.slice(index, index + 10);
-    const files = chunk.map((file) => new AttachmentBuilder(file.filePath, { name: file.originalName }));
+  if (!permissions?.has(PermissionFlagsBits.ViewChannel)) {
+    return {
+      sentCount: 0,
+      failedCount: savedFiles.length,
+      failedReasons: [`Missing View Channel permission in #${channel.name}`],
+    };
+  }
 
+  if (!permissions.has(PermissionFlagsBits.SendMessages)) {
+    return {
+      sentCount: 0,
+      failedCount: savedFiles.length,
+      failedReasons: [`Missing Send Messages permission in #${channel.name}`],
+    };
+  }
+
+  if (!permissions.has(PermissionFlagsBits.AttachFiles)) {
+    return {
+      sentCount: 0,
+      failedCount: savedFiles.length,
+      failedReasons: [`Missing Attach Files permission in #${channel.name}`],
+    };
+  }
+
+  for (const file of savedFiles) {
     try {
       const message = await channel.send({
-        content: `13BPZ drop ${Math.floor(index / 10) + 1}/${Math.ceil(savedFiles.length / 10)} for **${category.label}**`,
-        embeds: [
-          brandEmbed(
-            "New Leak Drop",
-            [
-              `Category: **${category.emoji} ${category.label}**`,
-              `Files: **${chunk.length}**`,
-              `Added by: **${uploader.tag}**`,
-            ].join("\n"),
-          ),
-        ],
-        files,
+        content: [
+          `**13BPZ ${category.emoji} ${category.label} leak drop**`,
+          `Posted by **${uploader.tag}**`,
+        ].join("\n"),
+        files: [new AttachmentBuilder(file.filePath, { name: file.originalName })],
       });
       sent.push(message.id);
     } catch (error) {
       console.error(`Failed to post leaks to #${channel.name}:`, error);
-      failed.push(...chunk.map((file) => `${file.originalName}: ${error.message}`));
+      failed.push(`${file.originalName}: ${error.message}`);
     }
   }
 
-  return { sentCount: sent.length, failedCount: failed.length };
+  return {
+    sentCount: sent.length,
+    failedCount: failed.length,
+    failedReasons: failed.slice(0, 3),
+  };
 }
 
 async function addLeak(interaction) {
@@ -377,6 +397,7 @@ async function addLeak(interaction) {
       const posted = await postLeaksToChannel(targetChannel, category, saved, interaction.user);
       postedText = `Posted to channel: ${targetChannel} (**${posted.sentCount}** message${posted.sentCount === 1 ? "" : "s"})`;
       if (posted.failedCount) postedText += `\nChannel post failures: **${posted.failedCount}** file${posted.failedCount === 1 ? "" : "s"}`;
+      if (posted.failedReasons?.length) postedText += `\nReason: ${posted.failedReasons.join(" | ")}`;
     } else {
       postedText = `Posted to channel: **No**\nCould not find the matching Discord channel. Run **/setup** again or check the channel name: **${category.channel}**`;
     }
