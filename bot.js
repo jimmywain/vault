@@ -31,6 +31,7 @@ const LEAKS_DIR = path.join(ROOT, "leaks");
 const DB_PATH = path.join(ROOT, "vault.sqlite");
 const NORMAL_ROLE = "13 Vault";
 const BOOSTER_ROLE = "Vault Booster";
+const LEAK_PINGS_ROLE = "Leak Pings";
 const GENERAL_CHAT = "💬 general-chat";
 
 const normalCategories = [
@@ -89,6 +90,13 @@ const insertLeak = db.prepare(`
 `);
 const getLeaks = db.prepare("SELECT * FROM leaks WHERE category = ? ORDER BY created_at DESC");
 const countLeaks = db.prepare("SELECT COUNT(*) AS count FROM leaks WHERE category = ?");
+const countAllLeaks = db.prepare("SELECT COUNT(*) AS count FROM leaks");
+const countBoosterLeaks = db.prepare(`SELECT COUNT(*) AS count FROM leaks WHERE category LIKE 'booster-%'`);
+const newestLeak = db.prepare("SELECT * FROM leaks ORDER BY created_at DESC LIMIT 1");
+const latestLeaks = db.prepare("SELECT * FROM leaks ORDER BY created_at DESC LIMIT ?");
+const getLeakById = db.prepare("SELECT * FROM leaks WHERE id = ?");
+const deleteLeakById = db.prepare("DELETE FROM leaks WHERE id = ?");
+const renameLeakById = db.prepare("UPDATE leaks SET original_name = @name WHERE id = @id");
 
 const client = new Client({
   intents: [
@@ -104,6 +112,23 @@ function brandEmbed(title, description) {
     .setDescription(description)
     .setFooter({ text: "13BPZ Vault // locked, loaded, leaked" })
     .setTimestamp();
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatLeakRow(row) {
+  const category = categoryByKey.get(row.category);
+  return `#${row.id} | ${category?.emoji || "📁"} **${category?.label || row.category}** | ${row.original_name} | ${formatBytes(row.size)}`;
 }
 
 function cleanFileName(name) {
@@ -221,8 +246,18 @@ function requireOwner(interaction) {
   return interaction.user.id === OWNER_ID;
 }
 
+function isOwnerOrMod(interaction) {
+  return requireOwner(interaction) || interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages);
+}
+
 function hasRole(member, roleName) {
   return member.roles.cache.some((role) => role.name === roleName);
+}
+
+function findGeneralChannel(guild) {
+  return guild.channels.cache.find(
+    (channel) => channel.type === ChannelType.GuildText && channel.name === GENERAL_CHAT,
+  );
 }
 
 function normalizedDiscordName(name) {
@@ -268,6 +303,7 @@ async function runSetup(interaction) {
   const everyone = guild.roles.everyone;
   const vaultRole = await findOrCreateRole(guild, NORMAL_ROLE, 0x2b2d31, "13BPZ Vault setup");
   const boosterRole = await findOrCreateRole(guild, BOOSTER_ROLE, 0xff3b3b, "13BPZ Vault setup");
+  await findOrCreateRole(guild, LEAK_PINGS_ROLE, 0x8b0000, "13BPZ Vault setup");
 
   const normalOverwrites = [
     { id: everyone.id, deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads, PermissionFlagsBits.AddReactions] },
@@ -331,6 +367,7 @@ async function runLockChannels(interaction) {
   const { guild } = interaction;
   const vaultRole = await findOrCreateRole(guild, NORMAL_ROLE, 0x2b2d31, "13BPZ Vault channel lock");
   const boosterRole = await findOrCreateRole(guild, BOOSTER_ROLE, 0xff3b3b, "13BPZ Vault channel lock");
+  await findOrCreateRole(guild, LEAK_PINGS_ROLE, 0x8b0000, "13BPZ Vault channel lock");
   const generalOverwrites = [
     { id: guild.roles.everyone.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory], deny: [PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.CreatePrivateThreads] },
     { id: vaultRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
@@ -421,7 +458,10 @@ async function postLeaksToChannel(channel, category, savedFiles, uploader) {
 
   for (const file of savedFiles) {
     try {
+      const pingRole = channel.guild.roles.cache.find((role) => role.name === LEAK_PINGS_ROLE);
       const message = await channel.send({
+        content: pingRole && sent.length === 0 ? `${pingRole}` : undefined,
+        allowedMentions: pingRole ? { roles: [pingRole.id] } : undefined,
         files: [new AttachmentBuilder(file.filePath, { name: file.originalName })],
       });
       sent.push(message.id);
@@ -503,6 +543,235 @@ async function addLeak(interaction) {
       ),
     ],
   });
+}
+
+async function announce(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only. Announcements stay locked.")] });
+    return;
+  }
+
+  const channel = interaction.options.getChannel("channel", true);
+  const title = interaction.options.getString("title", true);
+  const message = interaction.options.getString("message", true);
+
+  if (channel.type !== ChannelType.GuildText) {
+    await interaction.editReply({ embeds: [brandEmbed("Bad Channel", "Pick a normal text channel.")] });
+    return;
+  }
+
+  await channel.send({
+    embeds: [
+      brandEmbed(title, message)
+        .setFooter({ text: "13BPZ Vault // announcement" }),
+    ],
+  });
+
+  await interaction.editReply({ embeds: [brandEmbed("Announcement Sent", `Posted in ${channel}.`)] });
+}
+
+async function clearMessages(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!isOwnerOrMod(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner or Manage Messages permission required.")] });
+    return;
+  }
+
+  const amount = interaction.options.getInteger("amount", true);
+  const channel = interaction.options.getChannel("channel") || findGeneralChannel(interaction.guild) || interaction.channel;
+
+  if (channel.type !== ChannelType.GuildText) {
+    await interaction.editReply({ embeds: [brandEmbed("Bad Channel", "Pick a normal text channel.")] });
+    return;
+  }
+
+  const deleted = await channel.bulkDelete(amount, true);
+  await interaction.editReply({ embeds: [brandEmbed("Messages Cleared", `Deleted **${deleted.size}** message${deleted.size === 1 ? "" : "s"} in ${channel}.`)] });
+}
+
+async function showStats(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const total = countAllLeaks.get().count;
+  const boosterTotal = countBoosterLeaks.get().count;
+  const newest = newestLeak.get();
+  const categoryLines = allCategories
+    .map((category) => {
+      const row = countLeaks.get(category.key);
+      return `${category.emoji} **${category.label}**: ${row.count}`;
+    })
+    .join("\n");
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "Vault Stats",
+        [
+          `Total leaks: **${total}**`,
+          `Booster leaks: **${boosterTotal}**`,
+          newest ? `Newest: ${formatLeakRow(newest)}` : "Newest: none yet",
+          "",
+          categoryLines,
+        ].join("\n"),
+      ),
+    ],
+  });
+}
+
+async function showLatest(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const amount = interaction.options.getInteger("amount") || 5;
+  const rows = latestLeaks.all(amount);
+  const description = rows.length
+    ? rows.map(formatLeakRow).join("\n")
+    : "No leaks have been added yet.";
+
+  await interaction.editReply({ embeds: [brandEmbed("Latest Leaks", description)] });
+}
+
+async function deleteLeak(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only. Leak deletion is locked.")] });
+    return;
+  }
+
+  const id = interaction.options.getInteger("id", true);
+  const row = getLeakById.get(id);
+
+  if (!row) {
+    await interaction.editReply({ embeds: [brandEmbed("Not Found", `No leak found with ID **${id}**.`)] });
+    return;
+  }
+
+  try {
+    await fs.unlink(row.file_path);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+
+  deleteLeakById.run(id);
+  await interaction.editReply({ embeds: [brandEmbed("Leak Deleted", formatLeakRow(row))] });
+}
+
+async function renameLeak(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only. Leak rename is locked.")] });
+    return;
+  }
+
+  const id = interaction.options.getInteger("id", true);
+  const name = cleanFileName(interaction.options.getString("name", true));
+  const row = getLeakById.get(id);
+
+  if (!row) {
+    await interaction.editReply({ embeds: [brandEmbed("Not Found", `No leak found with ID **${id}**.`)] });
+    return;
+  }
+
+  renameLeakById.run({ id, name });
+  await interaction.editReply({ embeds: [brandEmbed("Leak Renamed", `#${id} is now **${name}**.`)] });
+}
+
+async function toggleLeakPing(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const role = await findOrCreateRole(interaction.guild, LEAK_PINGS_ROLE, 0x8b0000, "13BPZ Vault leak ping opt-in");
+
+  if (interaction.member.roles.cache.has(role.id)) {
+    await interaction.member.roles.remove(role, "13BPZ Vault leak ping opt-out");
+    await interaction.editReply({ embeds: [brandEmbed("Leak Pings Off", `Removed **${LEAK_PINGS_ROLE}**.`)] });
+    return;
+  }
+
+  await interaction.member.roles.add(role, "13BPZ Vault leak ping opt-in");
+  await interaction.editReply({ embeds: [brandEmbed("Leak Pings On", `Added **${LEAK_PINGS_ROLE}**. You will be pinged on new leak drops.`)] });
+}
+
+async function postRules(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only.")] });
+    return;
+  }
+
+  const channel = interaction.options.getChannel("channel") || findGeneralChannel(interaction.guild) || interaction.channel;
+  if (channel.type !== ChannelType.GuildText) {
+    await interaction.editReply({ embeds: [brandEmbed("Bad Channel", "Pick a normal text channel.")] });
+    return;
+  }
+
+  await channel.send({
+    embeds: [
+      brandEmbed(
+        "Rules",
+        [
+          "**1. No spam.** Keep general chat clean.",
+          "**2. No begging.** Drops come when they come.",
+          "**3. No selling inside the vault.** Keep trades out.",
+          "**4. Respect staff.** Arguing gets you removed.",
+          "**5. Booster leaks stay booster.** Do not repost private drops.",
+          "**6. Use common sense.** If it burns the vault, do not do it.",
+        ].join("\n"),
+      ),
+    ],
+  });
+
+  await interaction.editReply({ embeds: [brandEmbed("Rules Posted", `Rules posted in ${channel}.`)] });
+}
+
+async function cleanVaultChannels(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!isOwnerOrMod(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner or Manage Messages permission required.")] });
+    return;
+  }
+
+  await interaction.guild.channels.fetch();
+  const leakChannelNames = new Set(allCategories.map((category) => normalizedDiscordName(category.channel)));
+  const leakChannels = interaction.guild.channels.cache.filter(
+    (channel) =>
+      channel.type === ChannelType.GuildText &&
+      leakChannelNames.has(normalizedDiscordName(channel.name)),
+  );
+
+  let deletedCount = 0;
+  let scannedCount = 0;
+
+  for (const channel of leakChannels.values()) {
+    const messages = await channel.messages.fetch({ limit: 100 });
+    scannedCount += messages.size;
+    const userMessages = messages.filter((message) => !message.author.bot);
+    if (!userMessages.size) continue;
+    const deleted = await channel.bulkDelete(userMessages, true);
+    deletedCount += deleted.size;
+  }
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "Vault Channels Cleaned",
+        `Checked **${leakChannels.size}** leak channels, scanned **${scannedCount}** recent messages, deleted **${deletedCount}** user message${deletedCount === 1 ? "" : "s"}.`,
+      ),
+    ],
+  });
+}
+
+async function postToGeneral(guild, embed) {
+  await guild.channels.fetch();
+  const channel = findGeneralChannel(guild);
+  if (!channel) return false;
+  await channel.send({ embeds: [embed] });
+  return true;
 }
 
 async function showVaultMenu(interaction, type) {
@@ -624,6 +893,102 @@ function buildCommands() {
     new SlashCommandBuilder()
       .setName("lockchannels")
       .setDescription("Owner only: make every text channel read-only except general chat."),
+    new SlashCommandBuilder()
+      .setName("announce")
+      .setDescription("Owner only: post a clean 13BPZ announcement embed.")
+      .addChannelOption((option) =>
+        option
+          .setName("channel")
+          .setDescription("Channel to post in")
+          .addChannelTypes(ChannelType.GuildText)
+          .setRequired(true),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("title")
+          .setDescription("Announcement title")
+          .setRequired(true)
+          .setMaxLength(120),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("message")
+          .setDescription("Announcement message")
+          .setRequired(true)
+          .setMaxLength(2000),
+      ),
+    new SlashCommandBuilder()
+      .setName("clear")
+      .setDescription("Owner/mod: bulk delete messages from general chat or a chosen channel.")
+      .addIntegerOption((option) =>
+        option
+          .setName("amount")
+          .setDescription("Number of recent messages to delete")
+          .setRequired(true)
+          .setMinValue(1)
+          .setMaxValue(100),
+      )
+      .addChannelOption((option) =>
+        option
+          .setName("channel")
+          .setDescription("Optional channel, defaults to general chat")
+          .addChannelTypes(ChannelType.GuildText),
+      ),
+    new SlashCommandBuilder()
+      .setName("stats")
+      .setDescription("Show vault leak stats."),
+    new SlashCommandBuilder()
+      .setName("latest")
+      .setDescription("Show the newest leaks.")
+      .addIntegerOption((option) =>
+        option
+          .setName("amount")
+          .setDescription("How many leaks to show")
+          .setMinValue(1)
+          .setMaxValue(10),
+      ),
+    new SlashCommandBuilder()
+      .setName("deleteleak")
+      .setDescription("Owner only: delete a leak from storage and database.")
+      .addIntegerOption((option) =>
+        option
+          .setName("id")
+          .setDescription("Leak ID from /latest or /stats")
+          .setRequired(true)
+          .setMinValue(1),
+      ),
+    new SlashCommandBuilder()
+      .setName("renameleak")
+      .setDescription("Owner only: rename a tracked leak display name.")
+      .addIntegerOption((option) =>
+        option
+          .setName("id")
+          .setDescription("Leak ID from /latest")
+          .setRequired(true)
+          .setMinValue(1),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("name")
+          .setDescription("New file display name")
+          .setRequired(true)
+          .setMaxLength(120),
+      ),
+    new SlashCommandBuilder()
+      .setName("leakping")
+      .setDescription("Toggle the Leak Pings role for new leak alerts."),
+    new SlashCommandBuilder()
+      .setName("rules")
+      .setDescription("Owner only: post the 13BPZ rules embed.")
+      .addChannelOption((option) =>
+        option
+          .setName("channel")
+          .setDescription("Optional rules channel, defaults to general chat")
+          .addChannelTypes(ChannelType.GuildText),
+      ),
+    new SlashCommandBuilder()
+      .setName("cleanvaultchannels")
+      .setDescription("Owner/mod: remove user messages from leak channels and keep bot leak posts."),
     addLeakCommand,
     new SlashCommandBuilder()
       .setName("vault")
@@ -659,6 +1024,13 @@ client.on("guildMemberAdd", async (member) => {
   try {
     await addRoleIfPossible(member, NORMAL_ROLE);
     if (member.premiumSince) await addRoleIfPossible(member, BOOSTER_ROLE);
+    await postToGeneral(
+      member.guild,
+      brandEmbed(
+        "New Vault Member",
+        `${member} entered **13BPZ Vault** and received **${NORMAL_ROLE}**.`,
+      ),
+    );
   } catch (error) {
     console.error(`Failed to auto-role ${member.user.tag}:`, error);
   }
@@ -668,6 +1040,13 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
   try {
     if (!oldMember.premiumSince && newMember.premiumSince) {
       await addRoleIfPossible(newMember, BOOSTER_ROLE);
+      await postToGeneral(
+        newMember.guild,
+        brandEmbed(
+          "Booster Vault Unlocked",
+          `${newMember} boosted the server and unlocked **${BOOSTER_ROLE}**.`,
+        ),
+      );
     }
   } catch (error) {
     console.error(`Failed to assign booster role to ${newMember.user.tag}:`, error);
@@ -679,6 +1058,15 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === "setup") return await runSetup(interaction);
       if (interaction.commandName === "lockchannels") return await runLockChannels(interaction);
+      if (interaction.commandName === "announce") return await announce(interaction);
+      if (interaction.commandName === "clear") return await clearMessages(interaction);
+      if (interaction.commandName === "stats") return await showStats(interaction);
+      if (interaction.commandName === "latest") return await showLatest(interaction);
+      if (interaction.commandName === "deleteleak") return await deleteLeak(interaction);
+      if (interaction.commandName === "renameleak") return await renameLeak(interaction);
+      if (interaction.commandName === "leakping") return await toggleLeakPing(interaction);
+      if (interaction.commandName === "rules") return await postRules(interaction);
+      if (interaction.commandName === "cleanvaultchannels") return await cleanVaultChannels(interaction);
       if (interaction.commandName === "addleak") return await addLeak(interaction);
       if (interaction.commandName === "vault") return await showVaultMenu(interaction, "normal");
       if (interaction.commandName === "boostervault") return await showVaultMenu(interaction, "booster");

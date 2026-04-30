@@ -219,7 +219,7 @@ npm start
 10. Check Railway logs. You want to see:
 
 ```txt
-Registered 5 guild slash commands
+Registered 14 guild slash commands
 13BPZ Vault online as [bot name]
 ```
 
@@ -238,6 +238,7 @@ This creates:
 ```txt
 Role: 13 Vault
 Role: Vault Booster
+Role: Leak Pings
 Category: 13 VAULT
 Category: BOOSTER LEAKS
 Channel: 💬 general-chat
@@ -295,6 +296,25 @@ The bot posts the uploaded leak files in:
 Only the owner can use `/addleak`. Regular users can see the posted leak only if they have permission to view that Discord channel.
 
 ## User Commands
+
+Management:
+
+```txt
+/announce
+/clear
+/stats
+/latest
+/deleteleak
+/renameleak
+/rules
+/cleanvaultchannels
+```
+
+Leak ping opt-in:
+
+```txt
+/leakping
+```
 
 Normal vault:
 
