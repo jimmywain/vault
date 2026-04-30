@@ -39,6 +39,10 @@ const ANNOUNCEMENTS_CHANNEL = "📢-announcements";
 const RULES_CHANNEL = "📜-rules";
 const VERIFY_CHANNEL = "✅-verify";
 const GIVEAWAY_CHANNEL = "🎉-giveaways";
+const MODLOG_CHANNEL = "🛡️-mod-log";
+const SPAM_WINDOW_MS = 7000;
+const SPAM_MESSAGE_LIMIT = 5;
+const SPAM_TIMEOUT_MS = 5 * 60 * 1000;
 
 const normalCategories = [
   { key: "ticket-0027", label: "ticket-0027", channel: "📢 ticket-0027", emoji: "📢" },
@@ -106,6 +110,13 @@ db.exec(`
     created_at INTEGER NOT NULL,
     PRIMARY KEY (message_id, user_id)
   );
+
+  CREATE TABLE IF NOT EXISTS blacklisted_users (
+    user_id TEXT PRIMARY KEY,
+    reason TEXT,
+    added_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
 `);
 
 const insertLeak = db.prepare(`
@@ -134,13 +145,24 @@ const insertGiveawayEntry = db.prepare(`
 `);
 const countGiveawayEntries = db.prepare("SELECT COUNT(*) AS count FROM giveaway_entries WHERE message_id = ?");
 const getGiveawayEntries = db.prepare("SELECT user_id FROM giveaway_entries WHERE message_id = ?");
+const getBlacklistEntry = db.prepare("SELECT * FROM blacklisted_users WHERE user_id = ?");
+const addBlacklistEntry = db.prepare(`
+  INSERT INTO blacklisted_users (user_id, reason, added_by, created_at)
+  VALUES (@userId, @reason, @addedBy, @createdAt)
+  ON CONFLICT(user_id) DO UPDATE SET reason = excluded.reason, added_by = excluded.added_by, created_at = excluded.created_at
+`);
+const removeBlacklistEntry = db.prepare("DELETE FROM blacklisted_users WHERE user_id = ?");
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
   ],
 });
+
+const spamTracker = new Map();
 
 function brandEmbed(title, description) {
   return new EmbedBuilder()
@@ -274,6 +296,26 @@ async function findOrCreateInfoChannel(guild, name, reason) {
   return findOrCreateTextChannel(guild, null, name, overwrites, reason);
 }
 
+async function findOrCreateModLogChannel(guild) {
+  const overwrites = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages],
+    },
+    {
+      id: guild.members.me.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ManageChannels,
+        PermissionFlagsBits.ReadMessageHistory,
+      ],
+    },
+  ];
+
+  return findOrCreateTextChannel(guild, null, MODLOG_CHANNEL, overwrites, "13BPZ Vault mod log channel");
+}
+
 async function lockTextChannelsExceptGeneral(guild, generalChannel, vaultRole, boosterRole) {
   await guild.channels.fetch();
 
@@ -334,6 +376,10 @@ function isOwnerOrMod(interaction) {
 
 function hasRole(member, roleName) {
   return member.roles.cache.some((role) => role.name === roleName);
+}
+
+function isBlacklisted(userId) {
+  return Boolean(getBlacklistEntry.get(userId));
 }
 
 function findGeneralChannel(guild) {
@@ -562,6 +608,11 @@ async function postLeaksToChannel(channel, category, savedFiles, uploader) {
 
 async function addLeak(interaction) {
   await interaction.deferReply({ ephemeral: true });
+
+  if (isBlacklisted(interaction.user.id)) {
+    await interaction.editReply({ embeds: [brandEmbed("Blocked", "You are blacklisted from vault commands.")] });
+    return;
+  }
 
   if (!requireOwner(interaction)) {
     await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only. Leak uploads are locked to the vault boss.")] });
@@ -860,6 +911,89 @@ async function postToGeneral(guild, embed) {
   return true;
 }
 
+async function logModeration(guild, title, description) {
+  const channel = await findOrCreateModLogChannel(guild).catch(() => null);
+  if (!channel) return;
+  await channel.send({ embeds: [brandEmbed(title, description)] }).catch(console.error);
+}
+
+async function createModLog(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!isOwnerOrMod(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner or Manage Messages permission required.")] });
+    return;
+  }
+
+  const channel = await findOrCreateModLogChannel(interaction.guild);
+  await interaction.editReply({ embeds: [brandEmbed("Mod Log Ready", `Created or refreshed ${channel}.`)] });
+}
+
+async function manageBlacklist(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!isOwnerOrMod(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner or Manage Messages permission required.")] });
+    return;
+  }
+
+  const action = interaction.options.getString("action", true);
+  const user = interaction.options.getUser("user", true);
+  const reason = interaction.options.getString("reason") || "No reason provided";
+
+  if (action === "add") {
+    addBlacklistEntry.run({
+      userId: user.id,
+      reason,
+      addedBy: interaction.user.id,
+      createdAt: Date.now(),
+    });
+    await logModeration(interaction.guild, "User Blacklisted", `${user} was blocked from vault commands.\nReason: **${reason}**\nBy: ${interaction.user}`);
+    await interaction.editReply({ embeds: [brandEmbed("Blacklisted", `${user} is now blocked from vault commands.`)] });
+    return;
+  }
+
+  const removed = removeBlacklistEntry.run(user.id);
+  await logModeration(interaction.guild, "User Unblacklisted", `${user} was unblocked from vault commands by ${interaction.user}.`);
+  await interaction.editReply({ embeds: [brandEmbed("Blacklist Updated", removed.changes ? `${user} is unblocked.` : `${user} was not blacklisted.`)] });
+}
+
+function hasLink(content) {
+  return /(https?:\/\/|discord\.gg\/|discord\.com\/invite\/|www\.)/i.test(content);
+}
+
+function shouldModerateMessage(message) {
+  if (!message.guild || message.author.bot) return false;
+  if (message.author.id === OWNER_ID) return false;
+  if (message.member?.permissions.has(PermissionFlagsBits.ManageMessages)) return false;
+  return message.channel.name === GENERAL_CHAT || normalizedDiscordName(message.channel.name) === normalizedDiscordName(GENERAL_CHAT);
+}
+
+async function handleGeneralModeration(message) {
+  if (!shouldModerateMessage(message)) return;
+
+  if (hasLink(message.content)) {
+    await message.delete().catch(console.error);
+    await logModeration(message.guild, "Link Blocked", `${message.author} posted a blocked link in ${message.channel}.\nContent: ${message.content.slice(0, 500)}`);
+    await message.member?.timeout(2 * 60 * 1000, "13BPZ anti-link filter").catch(console.error);
+    return;
+  }
+
+  const now = Date.now();
+  const key = `${message.guild.id}:${message.author.id}`;
+  const recent = (spamTracker.get(key) || []).filter((entry) => now - entry.createdAt <= SPAM_WINDOW_MS);
+  recent.push({ content: message.content.toLowerCase().trim(), createdAt: now });
+  spamTracker.set(key, recent);
+
+  const repeated = recent.filter((entry) => entry.content && entry.content === recent[recent.length - 1].content).length;
+  if (recent.length >= SPAM_MESSAGE_LIMIT || repeated >= 3) {
+    await message.member?.timeout(SPAM_TIMEOUT_MS, "13BPZ anti-spam").catch(console.error);
+    await message.delete().catch(console.error);
+    spamTracker.delete(key);
+    await logModeration(message.guild, "Spam Timeout", `${message.author} was timed out for spam in ${message.channel}.`);
+  }
+}
+
 async function postVerify(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
@@ -1062,6 +1196,11 @@ function scheduleOpenGiveaways() {
 async function showVaultMenu(interaction, type) {
   await interaction.deferReply({ ephemeral: true });
 
+  if (isBlacklisted(interaction.user.id)) {
+    await interaction.editReply({ embeds: [brandEmbed("Blocked", "You are blacklisted from vault commands.")] });
+    return;
+  }
+
   const roleName = type === "booster" ? BOOSTER_ROLE : NORMAL_ROLE;
   const categories = type === "booster" ? boosterCategories : normalCategories;
 
@@ -1101,6 +1240,11 @@ async function sendVaultFiles(interaction) {
   }
 
   await interaction.deferReply({ ephemeral: true });
+
+  if (isBlacklisted(interaction.user.id)) {
+    await interaction.editReply({ embeds: [brandEmbed("Blocked", "You are blacklisted from vault commands.")] });
+    return;
+  }
 
   const roleName = type === "booster" ? BOOSTER_ROLE : NORMAL_ROLE;
   if (!hasRole(interaction.member, roleName)) {
@@ -1310,6 +1454,34 @@ function buildCommands() {
           .addChannelTypes(ChannelType.GuildText),
       ),
     new SlashCommandBuilder()
+      .setName("blacklist")
+      .setDescription("Owner/mod: block or unblock a user from vault commands.")
+      .addStringOption((option) =>
+        option
+          .setName("action")
+          .setDescription("Add or remove blacklist")
+          .setRequired(true)
+          .addChoices(
+            { name: "add", value: "add" },
+            { name: "remove", value: "remove" },
+          ),
+      )
+      .addUserOption((option) =>
+        option
+          .setName("user")
+          .setDescription("User to update")
+          .setRequired(true),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("reason")
+          .setDescription("Reason for blacklist")
+          .setMaxLength(500),
+      ),
+    new SlashCommandBuilder()
+      .setName("modlog")
+      .setDescription("Owner/mod: create or refresh the staff moderation log channel."),
+    new SlashCommandBuilder()
       .setName("cleanvaultchannels")
       .setDescription("Owner/mod: remove user messages from leak channels and keep bot leak posts."),
     addLeakCommand,
@@ -1327,6 +1499,9 @@ async function registerCommands() {
   const commands = buildCommands();
 
   if (GUILD_ID) {
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+    console.log("Cleared global slash commands to prevent duplicate Discord command entries");
+
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     console.log(`Registered ${commands.length} guild slash commands for ${GUILD_ID}`);
     return;
@@ -1377,6 +1552,14 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
   }
 });
 
+client.on("messageCreate", async (message) => {
+  try {
+    await handleGeneralModeration(message);
+  } catch (error) {
+    console.error("Failed to moderate message:", error);
+  }
+});
+
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -1392,6 +1575,8 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.commandName === "rules") return await postRules(interaction);
       if (interaction.commandName === "verify") return await postVerify(interaction);
       if (interaction.commandName === "giveaway") return await createGiveaway(interaction);
+      if (interaction.commandName === "blacklist") return await manageBlacklist(interaction);
+      if (interaction.commandName === "modlog") return await createModLog(interaction);
       if (interaction.commandName === "cleanvaultchannels") return await cleanVaultChannels(interaction);
       if (interaction.commandName === "addleak") return await addLeak(interaction);
       if (interaction.commandName === "vault") return await showVaultMenu(interaction, "normal");

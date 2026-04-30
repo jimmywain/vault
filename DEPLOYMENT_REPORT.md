@@ -219,9 +219,12 @@ npm start
 10. Check Railway logs. You want to see:
 
 ```txt
-Registered 16 guild slash commands
+Cleared global slash commands to prevent duplicate Discord command entries
+Registered 18 guild slash commands
 13BPZ Vault online as [bot name]
 ```
+
+If Discord was showing duplicate commands, this cleanup removes the old global command copies. It can take a little while for Discord clients to visually refresh.
 
 ## First Discord Setup
 
@@ -246,6 +249,7 @@ Channel: 📢-announcements
 Channel: 📜-rules
 Channel: ✅-verify
 Channel: 🎉-giveaways
+Channel: 🛡️-mod-log
 All vault channels
 All booster channels
 All leak storage folders
@@ -313,6 +317,8 @@ Management:
 /rules
 /verify
 /giveaway
+/blacklist
+/modlog
 /cleanvaultchannels
 ```
 
@@ -323,6 +329,16 @@ Management:
 `/verify` creates/uses `✅-verify` and posts a button that gives users the `13 Vault` role.
 
 `/giveaway` creates/uses `🎉-giveaways` and starts a timed button giveaway. Duration examples: `10m`, `2h`, `1d`.
+
+`/modlog` creates/uses `🛡️-mod-log` for anti-spam, anti-link, timeout, and blacklist logs.
+
+`/blacklist action:add user:@user` blocks a user from `/vault`, `/boostervault`, and vault dropdown downloads.
+
+Anti-spam and anti-link filtering run in `💬 general-chat`. To make link detection work, enable this in Discord Developer Portal:
+
+```txt
+Bot > Privileged Gateway Intents > Message Content Intent
+```
 
 Leak ping opt-in:
 
