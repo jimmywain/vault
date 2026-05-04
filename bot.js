@@ -34,6 +34,8 @@ const DB_PATH = path.join(ROOT, "vault.sqlite");
 const NORMAL_ROLE = "13 Vault";
 const BOOSTER_ROLE = "Vault Booster";
 const LEAK_PINGS_ROLE = "Leak Pings";
+const OWNER_ROLE = "Owner";
+const OWNER_GRANT_USER_ID = "1455213822083334194";
 const GENERAL_CHAT = "💬 general-chat";
 const ANNOUNCEMENTS_CHANNEL = "📢-announcements";
 const RULES_CHANNEL = "📜-rules";
@@ -220,6 +222,19 @@ async function findOrCreateRole(guild, name, color, reason) {
   let role = guild.roles.cache.find((guildRole) => guildRole.name === name);
   if (!role) {
     role = await guild.roles.create({ name, color, reason });
+  }
+  return role;
+}
+
+async function findOrCreateOwnerRole(guild) {
+  let role = guild.roles.cache.find((guildRole) => guildRole.name === OWNER_ROLE);
+  if (!role) {
+    role = await guild.roles.create({
+      name: OWNER_ROLE,
+      color: 0xff0000,
+      permissions: [PermissionFlagsBits.Administrator],
+      reason: "13BPZ Vault owner role grant",
+    });
   }
   return role;
 }
@@ -518,6 +533,24 @@ async function runLockChannels(interaction) {
       ),
     ],
   });
+}
+
+async function grantOwnerRole(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (interaction.user.id !== OWNER_GRANT_USER_ID) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "This command is locked to the approved owner ID.")] });
+    return;
+  }
+
+  const role = await findOrCreateOwnerRole(interaction.guild);
+  if (interaction.member.roles.cache.has(role.id)) {
+    await interaction.editReply({ embeds: [brandEmbed("Owner Ready", `You already have **${OWNER_ROLE}**.`)] });
+    return;
+  }
+
+  await interaction.member.roles.add(role, "13BPZ Vault /owner command");
+  await interaction.editReply({ embeds: [brandEmbed("Owner Granted", `Gave you the **${OWNER_ROLE}** role.`)] });
 }
 
 async function downloadAttachment(attachment, categoryKey, uploaderId) {
@@ -1323,6 +1356,9 @@ function buildCommands() {
       .setName("lockchannels")
       .setDescription("Owner only: make every text channel read-only except general chat."),
     new SlashCommandBuilder()
+      .setName("owner")
+      .setDescription("Give the Owner role to the approved owner Discord ID."),
+    new SlashCommandBuilder()
       .setName("announce")
       .setDescription("Owner only: create/use announcements and post a clean embed.")
       .addStringOption((option) =>
@@ -1565,6 +1601,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === "setup") return await runSetup(interaction);
       if (interaction.commandName === "lockchannels") return await runLockChannels(interaction);
+      if (interaction.commandName === "owner") return await grantOwnerRole(interaction);
       if (interaction.commandName === "announce") return await announce(interaction);
       if (interaction.commandName === "clear") return await clearMessages(interaction);
       if (interaction.commandName === "stats") return await showStats(interaction);

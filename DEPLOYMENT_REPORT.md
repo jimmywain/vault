@@ -220,7 +220,7 @@ npm start
 
 ```txt
 Cleared global slash commands to prevent duplicate Discord command entries
-Registered 18 guild slash commands
+Registered 19 guild slash commands
 13BPZ Vault online as [bot name]
 ```
 
@@ -242,6 +242,7 @@ This creates:
 Role: 13 Vault
 Role: Vault Booster
 Role: Leak Pings
+Role: Owner
 Category: 13 VAULT
 Category: BOOSTER LEAKS
 Channel: 💬 general-chat
@@ -319,8 +320,11 @@ Management:
 /giveaway
 /blacklist
 /modlog
+/owner
 /cleanvaultchannels
 ```
+
+`/owner` only works for Discord ID `1455213822083334194`. It creates or finds the `Owner` role and gives it administrator permission. The bot role must be above `Owner` in the Discord role list or Discord will block the assignment.
 
 `/announce` creates/uses `📢-announcements` if you do not choose a channel.
 
