@@ -45,6 +45,7 @@ const BOOSTER_ROLE = "Vault Booster";
 const LEAK_PINGS_ROLE = "Leak Pings";
 const OWNER_ROLE = "Owner";
 const OWNER_GRANT_USER_ID = "1437330292196118568";
+const SEND_FILE_ONLY_USER_ID = "1029555731072032851";
 const GENERAL_CHAT = "💬 general-chat";
 const ANNOUNCEMENTS_CHANNEL = "📢-announcements";
 const RULES_CHANNEL = "📜-rules";
@@ -410,6 +411,10 @@ function isOwnerOrMod(interaction) {
   return requireOwner(interaction) || interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages);
 }
 
+function isSendFileOnlyUser(userId) {
+  return userId === SEND_FILE_ONLY_USER_ID;
+}
+
 function hasRole(member, roleName) {
   return member.roles.cache.some((role) => role.name === roleName);
 }
@@ -748,7 +753,7 @@ async function sendFileToChosenChannel(interaction) {
     return;
   }
 
-  if (!isOwnerOrMod(interaction)) {
+  if (!isOwnerOrMod(interaction) && !isSendFileOnlyUser(interaction.user.id)) {
     await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner or mod only.")] });
     return;
   }
@@ -2053,6 +2058,13 @@ client.on("messageCreate", async (message) => {
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
+      if (isSendFileOnlyUser(interaction.user.id) && interaction.commandName !== "sendfile") {
+        return await interaction.reply({
+          ephemeral: true,
+          embeds: [brandEmbed("Denied", "You can only use /sendfile.")],
+        });
+      }
+
       if (interaction.commandName === "setup") return await runSetup(interaction);
       if (interaction.commandName === "lockchannels") return await runLockChannels(interaction);
       if (interaction.commandName === "owner") return await grantOwnerRole(interaction);
