@@ -179,6 +179,7 @@ const dashboardSessions = new Map();
 const oauthStates = new Map();
 const pendingChannelUploads = new Map();
 const pendingAddLeakUploads = new Map();
+const pendingTextUploads = new Map();
 
 function brandEmbed(title, description) {
   return new EmbedBuilder()
@@ -414,6 +415,10 @@ function isOwnerOrMod(interaction) {
 
 function isSendFileOnlyUser(userId) {
   return userId === SEND_FILE_ONLY_USER_ID;
+}
+
+function isSendFileOnlyCommand(commandName) {
+  return commandName === "sendfile" || commandName === "sendlinks";
 }
 
 function hasRole(member, roleName) {
@@ -933,6 +938,103 @@ async function handleChannelUploadSelect(interaction) {
         ].filter(Boolean).join("\n"),
       ),
     ],
+    components: [],
+  });
+}
+
+async function sendTextToChosenChannel(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (isBlacklisted(interaction.user.id)) {
+    await interaction.editReply({ embeds: [brandEmbed("Blocked", "You are blacklisted from vault commands.")] });
+    return;
+  }
+
+  if (!isOwnerOrMod(interaction) && !isSendFileOnlyUser(interaction.user.id)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner or mod only.")] });
+    return;
+  }
+
+  const message = interaction.options.getString("message", true).trim();
+  if (!message) {
+    await interaction.editReply({ embeds: [brandEmbed("No Text", "Write the links or text you want to send.")] });
+    return;
+  }
+
+  const token = crypto.randomBytes(8).toString("hex");
+  pendingTextUploads.set(token, {
+    guildId: interaction.guild.id,
+    userId: interaction.user.id,
+    message,
+    createdAt: Date.now(),
+  });
+  setTimeout(() => pendingTextUploads.delete(token), 15 * 60 * 1000).unref();
+
+  const menu = new ChannelSelectMenuBuilder()
+    .setCustomId(`textupload:${token}`)
+    .setPlaceholder("Pick the channel to send this text")
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addChannelTypes(ChannelType.GuildText);
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "Choose Channel",
+        [
+          "Text ready to send.",
+          "Pick one of this server's text channels below.",
+        ].join("\n"),
+      ),
+    ],
+    components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
+
+async function handleTextUploadSelect(interaction) {
+  await interaction.deferUpdate();
+
+  const token = interaction.customId.split(":")[1];
+  const session = pendingTextUploads.get(token);
+  if (!session) {
+    await interaction.editReply({
+      embeds: [brandEmbed("Expired", "That text picker expired. Run /sendlinks again.")],
+      components: [],
+    });
+    return;
+  }
+
+  if (session.userId !== interaction.user.id) {
+    await interaction.followUp({ ephemeral: true, embeds: [brandEmbed("Locked", "This channel picker belongs to another user.")] });
+    return;
+  }
+
+  if (session.guildId !== interaction.guild.id) {
+    await interaction.editReply({ embeds: [brandEmbed("Wrong Server", "That message was started in another server.")], components: [] });
+    return;
+  }
+
+  const channelId = interaction.values[0];
+  const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    await interaction.editReply({ embeds: [brandEmbed("Bad Channel", "Pick a normal text channel.")], components: [] });
+    return;
+  }
+
+  const permissions = channel.permissionsFor(channel.guild.members.me);
+  if (!permissions?.has(PermissionFlagsBits.ViewChannel) || !permissions.has(PermissionFlagsBits.SendMessages)) {
+    await interaction.editReply({
+      embeds: [brandEmbed("Missing Permissions", `I need View Channel and Send Messages in #${channel.name}.`)],
+      components: [],
+    });
+    return;
+  }
+
+  const sent = await channel.send({ content: session.message, allowedMentions: { parse: [] } });
+  pendingTextUploads.delete(token);
+
+  await interaction.editReply({
+    embeds: [brandEmbed("Message Sent", `Posted in ${channel}.\nMessage ID: **${sent.id}**`)],
     components: [],
   });
 }
@@ -1577,6 +1679,17 @@ function buildCommands() {
     );
   }
 
+  const sendLinksCommand = new SlashCommandBuilder()
+    .setName("sendlinks")
+    .setDescription("Owner/mod: send links or text to a chosen server channel.")
+    .addStringOption((option) =>
+      option
+        .setName("message")
+        .setDescription("Links or text to send")
+        .setRequired(true)
+        .setMaxLength(2000),
+    );
+
   return [
     new SlashCommandBuilder()
       .setName("setup")
@@ -1751,6 +1864,7 @@ function buildCommands() {
       .setDescription("Owner/mod: remove user messages from leak channels and keep bot leak posts."),
     addLeakCommand,
     sendFileCommand,
+    sendLinksCommand,
     new SlashCommandBuilder()
       .setName("vault")
       .setDescription("Open the normal 13 Vault leak menu."),
@@ -2120,10 +2234,10 @@ client.on("messageCreate", async (message) => {
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
-      if (isSendFileOnlyUser(interaction.user.id) && interaction.commandName !== "sendfile") {
+      if (isSendFileOnlyUser(interaction.user.id) && !isSendFileOnlyCommand(interaction.commandName)) {
         return await interaction.reply({
           ephemeral: true,
-          embeds: [brandEmbed("Denied", "You can only use /sendfile.")],
+          embeds: [brandEmbed("Denied", "You can only use /sendfile and /sendlinks.")],
         });
       }
 
@@ -2145,6 +2259,7 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.commandName === "cleanvaultchannels") return await cleanVaultChannels(interaction);
       if (interaction.commandName === "addleak") return await addLeak(interaction);
       if (interaction.commandName === "sendfile") return await sendFileToChosenChannel(interaction);
+      if (interaction.commandName === "sendlinks") return await sendTextToChosenChannel(interaction);
       if (interaction.commandName === "vault") return await showVaultMenu(interaction, "normal");
       if (interaction.commandName === "boostervault") return await showVaultMenu(interaction, "booster");
     }
@@ -2159,6 +2274,10 @@ client.on("interactionCreate", async (interaction) => {
 
     if (interaction.isChannelSelectMenu() && interaction.customId.startsWith("addleakchannel:")) {
       return await handleAddLeakChannelSelect(interaction);
+    }
+
+    if (interaction.isChannelSelectMenu() && interaction.customId.startsWith("textupload:")) {
+      return await handleTextUploadSelect(interaction);
     }
 
     if (interaction.isButton() && interaction.customId === "verify:13vault") {
