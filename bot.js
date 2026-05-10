@@ -1707,14 +1707,20 @@ function buildCommands() {
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   const commands = buildCommands();
+  const visibleGuildIds = client.guilds.cache.map((guild) => guild.id);
+  const targetGuildIds = [...new Set([...GUILD_IDS, ...visibleGuildIds])];
 
-  if (GUILD_IDS.length) {
+  if (targetGuildIds.length) {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
     console.log("Cleared global slash commands to prevent duplicate Discord command entries");
 
-    for (const guildId of GUILD_IDS) {
-      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commands });
-      console.log(`Registered ${commands.length} guild slash commands for ${guildId}`);
+    for (const guildId of targetGuildIds) {
+      try {
+        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commands });
+        console.log(`Registered ${commands.length} guild slash commands for ${guildId}`);
+      } catch (error) {
+        console.error(`Failed to register guild slash commands for ${guildId}:`, error);
+      }
     }
     return;
   }
