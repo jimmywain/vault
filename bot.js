@@ -942,6 +942,80 @@ async function handleChannelUploadSelect(interaction) {
   });
 }
 
+function truncateText(text, maxLength) {
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function cleanLinkTitle(title, index) {
+  const cleaned = title
+    .replace(/^[\s|•\-–—:]+|[\s|•\-–—:]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return truncateText(cleaned || `Link ${index}`, 256);
+}
+
+function parseLinksAndText(message) {
+  const urlRegex = /https?:\/\/[^\s<>()]+/gi;
+  const items = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = urlRegex.exec(message)) !== null) {
+    const url = match[0].replace(/[.,!?;:]+$/g, "");
+    const title = message.slice(lastIndex, match.index);
+    items.push({
+      title: cleanLinkTitle(title, items.length + 1),
+      url,
+    });
+    lastIndex = match.index + match[0].length;
+  }
+
+  const trailingText = message.slice(lastIndex).trim();
+  return { items, trailingText };
+}
+
+function buildTextMessageEmbeds(message, sender) {
+  const { items, trailingText } = parseLinksAndText(message);
+  const embeds = [];
+
+  if (!items.length) {
+    return [
+      new EmbedBuilder()
+        .setColor(0x130000)
+        .setTitle("13BPZ Vault | Message")
+        .setDescription(truncateText(message, 4096))
+        .setFooter({ text: `Sent by ${sender.tag}` })
+        .setTimestamp(),
+    ];
+  }
+
+  for (let index = 0; index < items.length; index += 25) {
+    const chunk = items.slice(index, index + 25);
+    const embed = new EmbedBuilder()
+      .setColor(0x130000)
+      .setTitle(index === 0 ? "13BPZ Vault | Links" : "13BPZ Vault | Links Continued")
+      .setFooter({ text: `Sent by ${sender.tag}` })
+      .setTimestamp();
+
+    if (index === 0 && trailingText) {
+      embed.setDescription(truncateText(trailingText, 4096));
+    }
+
+    for (const item of chunk) {
+      embed.addFields({
+        name: item.title,
+        value: `[Open Link](${item.url})`,
+      });
+    }
+
+    embeds.push(embed);
+  }
+
+  return embeds;
+}
+
 async function sendTextToChosenChannel(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
@@ -1030,11 +1104,16 @@ async function handleTextUploadSelect(interaction) {
     return;
   }
 
-  const sent = await channel.send({ content: session.message, allowedMentions: { parse: [] } });
+  const embeds = buildTextMessageEmbeds(session.message, interaction.user);
+  const sentMessages = [];
+  for (const embed of embeds) {
+    const sent = await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+    sentMessages.push(sent.id);
+  }
   pendingTextUploads.delete(token);
 
   await interaction.editReply({
-    embeds: [brandEmbed("Message Sent", `Posted in ${channel}.\nMessage ID: **${sent.id}**`)],
+    embeds: [brandEmbed("Message Sent", `Posted in ${channel}.\nMessages sent: **${sentMessages.length}**`)],
     components: [],
   });
 }
