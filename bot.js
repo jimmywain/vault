@@ -5,6 +5,7 @@ const {
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelSelectMenuBuilder,
   ChannelType,
   Client,
   EmbedBuilder,
@@ -18,11 +19,19 @@ const {
 const Database = require("better-sqlite3");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const crypto = require("node:crypto");
+const express = require("express");
 
 const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
+const GUILD_IDS = (process.env.GUILD_IDS || process.env.GUILD_ID || "")
+  .split(/[,\s]+/)
+  .map((guildId) => guildId.trim())
+  .filter(Boolean);
 const OWNER_ID = process.env.OWNER_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET || process.env.DISCORD_CLIENT_SECRET;
+const DASHBOARD_URL = process.env.DASHBOARD_URL;
+const PORT = Number(process.env.PORT || 3000);
 
 if (!TOKEN || !CLIENT_ID || !OWNER_ID) {
   throw new Error("Missing required env vars: DISCORD_TOKEN/TOKEN, CLIENT_ID, OWNER_ID");
@@ -165,6 +174,9 @@ const client = new Client({
 });
 
 const spamTracker = new Map();
+const dashboardSessions = new Map();
+const oauthStates = new Map();
+const pendingChannelUploads = new Map();
 
 function brandEmbed(title, description) {
   return new EmbedBuilder()
@@ -205,6 +217,15 @@ function parseDuration(text) {
   };
 
   return value * multipliers[unit];
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function cleanFileName(name) {
@@ -553,8 +574,8 @@ async function grantOwnerRole(interaction) {
   await interaction.editReply({ embeds: [brandEmbed("Owner Granted", `Gave you the **${OWNER_ROLE}** role.`)] });
 }
 
-async function downloadAttachment(attachment, categoryKey, uploaderId) {
-  const categoryDir = path.join(LEAKS_DIR, categoryKey);
+async function downloadAttachmentFile(attachment, folderKey) {
+  const categoryDir = path.join(LEAKS_DIR, folderKey);
   await ensureDir(categoryDir);
 
   const response = await fetch(attachment.url);
@@ -569,23 +590,31 @@ async function downloadAttachment(attachment, categoryKey, uploaderId) {
   const filePath = path.join(categoryDir, storedName);
 
   await fs.writeFile(filePath, bytes);
-  insertLeak.run({
-    category: categoryKey,
-    originalName: attachment.name || "leak.bin",
-    storedName,
-    filePath,
-    contentType: attachment.contentType || null,
-    size: attachment.size || bytes.length,
-    uploadedBy: uploaderId,
-    createdAt: timestamp,
-  });
 
   return {
     originalName: attachment.name || "leak.bin",
     storedName,
     filePath,
+    contentType: attachment.contentType || null,
     size: attachment.size || bytes.length,
   };
+}
+
+async function downloadAttachment(attachment, categoryKey, uploaderId) {
+  const savedFile = await downloadAttachmentFile(attachment, categoryKey);
+
+  insertLeak.run({
+    category: categoryKey,
+    originalName: savedFile.originalName,
+    storedName: savedFile.storedName,
+    filePath: savedFile.filePath,
+    contentType: savedFile.contentType,
+    size: savedFile.size,
+    uploadedBy: uploaderId,
+    createdAt: Date.now(),
+  });
+
+  return savedFile;
 }
 
 async function postLeaksToChannel(channel, category, savedFiles, uploader) {
@@ -708,6 +737,132 @@ async function addLeak(interaction) {
         ].join("\n"),
       ),
     ],
+  });
+}
+
+async function sendFileToChosenChannel(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (isBlacklisted(interaction.user.id)) {
+    await interaction.editReply({ embeds: [brandEmbed("Blocked", "You are blacklisted from vault commands.")] });
+    return;
+  }
+
+  if (!isOwnerOrMod(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner or mod only.")] });
+    return;
+  }
+
+  const attachments = [];
+  for (let index = 1; index <= 10; index += 1) {
+    const attachment = interaction.options.getAttachment(`file${index}`);
+    if (attachment) attachments.push(attachment);
+  }
+
+  if (attachments.length === 0) {
+    await interaction.editReply({ embeds: [brandEmbed("No Files", "Attach at least one file or video.")] });
+    return;
+  }
+
+  const saved = [];
+  const failed = [];
+  const folderKey = path.join("custom-uploads", interaction.guild.id);
+
+  for (const attachment of attachments) {
+    try {
+      saved.push(await downloadAttachmentFile(attachment, folderKey));
+    } catch (error) {
+      console.error(error);
+      failed.push(`${attachment.name}: ${error.message}`);
+    }
+  }
+
+  if (!saved.length) {
+    await interaction.editReply({
+      embeds: [brandEmbed("Upload Failed", `No files could be saved.\n${failed.slice(0, 3).join("\n")}`)],
+    });
+    return;
+  }
+
+  const token = crypto.randomBytes(8).toString("hex");
+  pendingChannelUploads.set(token, {
+    guildId: interaction.guild.id,
+    userId: interaction.user.id,
+    files: saved,
+    failed,
+    createdAt: Date.now(),
+  });
+  setTimeout(() => pendingChannelUploads.delete(token), 15 * 60 * 1000).unref();
+
+  const menu = new ChannelSelectMenuBuilder()
+    .setCustomId(`channelupload:${token}`)
+    .setPlaceholder("Pick the channel to send these files")
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addChannelTypes(ChannelType.GuildText);
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "Choose Channel",
+        [
+          `Files ready: **${saved.length}**`,
+          failed.length ? `Failed to save: **${failed.length}**` : "Failed to save: **0**",
+          "Pick one of this server's text channels below.",
+        ].join("\n"),
+      ),
+    ],
+    components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
+
+async function handleChannelUploadSelect(interaction) {
+  await interaction.deferUpdate();
+
+  const token = interaction.customId.split(":")[1];
+  const session = pendingChannelUploads.get(token);
+  if (!session) {
+    await interaction.editReply({
+      embeds: [brandEmbed("Expired", "That upload picker expired. Run /sendfile again.")],
+      components: [],
+    });
+    return;
+  }
+
+  if (session.userId !== interaction.user.id) {
+    await interaction.followUp({ ephemeral: true, embeds: [brandEmbed("Locked", "This channel picker belongs to another user.")] });
+    return;
+  }
+
+  if (session.guildId !== interaction.guild.id) {
+    await interaction.editReply({ embeds: [brandEmbed("Wrong Server", "That upload was started in another server.")], components: [] });
+    return;
+  }
+
+  const channelId = interaction.values[0];
+  const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    await interaction.editReply({ embeds: [brandEmbed("Bad Channel", "Pick a normal text channel.")], components: [] });
+    return;
+  }
+
+  const posted = await postLeaksToChannel(channel, { label: channel.name }, session.files, interaction.user);
+  pendingChannelUploads.delete(token);
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "Files Sent",
+        [
+          `Channel: ${channel}`,
+          `Posted: **${posted.sentCount}** file${posted.sentCount === 1 ? "" : "s"}`,
+          posted.failedCount ? `Failed to post: **${posted.failedCount}**` : "Failed to post: **0**",
+          posted.failedReasons?.length ? `Reason: ${posted.failedReasons.join(" | ")}` : null,
+          session.failed.length ? `Upload save failures: **${session.failed.length}**` : null,
+        ].filter(Boolean).join("\n"),
+      ),
+    ],
+    components: [],
   });
 }
 
@@ -1348,6 +1503,19 @@ function buildCommands() {
     );
   }
 
+  const sendFileCommand = new SlashCommandBuilder()
+    .setName("sendfile")
+    .setDescription("Owner/mod: upload files, then pick an existing server channel to send them.");
+
+  for (let index = 1; index <= 10; index += 1) {
+    sendFileCommand.addAttachmentOption((option) =>
+      option
+        .setName(`file${index}`)
+        .setDescription(index === 1 ? "File or video to send" : `Optional extra file ${index}`)
+        .setRequired(index === 1),
+    );
+  }
+
   return [
     new SlashCommandBuilder()
       .setName("setup")
@@ -1521,6 +1689,7 @@ function buildCommands() {
       .setName("cleanvaultchannels")
       .setDescription("Owner/mod: remove user messages from leak channels and keep bot leak posts."),
     addLeakCommand,
+    sendFileCommand,
     new SlashCommandBuilder()
       .setName("vault")
       .setDescription("Open the normal 13 Vault leak menu."),
@@ -1534,17 +1703,302 @@ async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   const commands = buildCommands();
 
-  if (GUILD_ID) {
+  if (GUILD_IDS.length) {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
     console.log("Cleared global slash commands to prevent duplicate Discord command entries");
 
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-    console.log(`Registered ${commands.length} guild slash commands for ${GUILD_ID}`);
+    for (const guildId of GUILD_IDS) {
+      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guildId), { body: commands });
+      console.log(`Registered ${commands.length} guild slash commands for ${guildId}`);
+    }
     return;
   }
 
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
   console.log(`Registered ${commands.length} global slash commands`);
+}
+
+function parseCookies(header = "") {
+  return Object.fromEntries(
+    header
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf("=");
+        return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+      }),
+  );
+}
+
+function dashboardBaseUrl(req) {
+  if (DASHBOARD_URL) return DASHBOARD_URL.replace(/\/$/, "");
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+  return `${protocol}://${req.get("host")}`;
+}
+
+function dashboardRedirectUri(req) {
+  return `${dashboardBaseUrl(req)}/auth/callback`;
+}
+
+function getDashboardUser(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const session = dashboardSessions.get(cookies.vault_session);
+  if (!session) return null;
+  if (Date.now() > session.expiresAt) {
+    dashboardSessions.delete(cookies.vault_session);
+    return null;
+  }
+  return session.user;
+}
+
+function requireDashboardOwner(req, res, next) {
+  const user = getDashboardUser(req);
+  if (!user) {
+    res.redirect("/login");
+    return;
+  }
+  if (user.id !== OWNER_ID) {
+    res.status(403).send("Denied. This dashboard is owner-only.");
+    return;
+  }
+  req.dashboardUser = user;
+  next();
+}
+
+function dashboardLoginPage(req) {
+  const configured = Boolean(CLIENT_SECRET);
+  const setupText = configured
+    ? "Authorize with Discord to open the 13BPZ control app."
+    : "Set CLIENT_SECRET and DASHBOARD_URL in Railway, then add the callback URL in Discord Developer Portal.";
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>13BPZ Vault App</title>
+  <style>
+    body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#100f13;color:#f5f5f5}
+    main{max-width:760px;margin:12vh auto;padding:32px}
+    .panel{border:1px solid #30232a;background:#18161b;padding:28px;border-radius:8px}
+    h1{margin:0 0 12px;font-size:34px}
+    p{color:#c9c2c7;line-height:1.5}
+    a.button{display:inline-block;margin-top:16px;padding:12px 16px;background:#8b0000;color:#fff;text-decoration:none;border-radius:6px;font-weight:700}
+    code{background:#242027;padding:2px 5px;border-radius:4px}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <h1>13BPZ Vault App</h1>
+      <p>${escapeHtml(setupText)}</p>
+      ${configured ? `<a class="button" href="/auth/discord">Authorize Discord</a>` : `<p>Callback URL: <code>${escapeHtml(dashboardRedirectUri(req))}</code></p>`}
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function dashboardPage(user) {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>13BPZ Vault Dashboard</title>
+  <style>
+    body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#100f13;color:#f5f5f5}
+    header{border-bottom:1px solid #30232a;background:#18161b;padding:18px 24px;display:flex;justify-content:space-between;align-items:center}
+    main{padding:24px;display:grid;grid-template-columns:300px 1fr;gap:18px}
+    .panel{border:1px solid #30232a;background:#18161b;padding:18px;border-radius:8px}
+    h1,h2{margin:0 0 12px}
+    button,select{width:100%;padding:10px;margin:6px 0;background:#242027;color:#fff;border:1px solid #3a3037;border-radius:6px}
+    a{color:#ff6961}
+    .muted{color:#b9b0b6}
+    pre{white-space:pre-wrap;background:#0d0c10;padding:12px;border-radius:6px;max-height:420px;overflow:auto}
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <strong>13BPZ Vault Dashboard</strong>
+      <span class="muted">Authorized as ${escapeHtml(user.username)}#${escapeHtml(user.discriminator || "0")}</span>
+    </div>
+    <a href="/logout">Logout</a>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>Servers</h2>
+      <select id="guilds"></select>
+      <button id="loadChannels">Load Channels</button>
+      <h2>Categories</h2>
+      <select id="categories"></select>
+    </section>
+    <section class="panel">
+      <h2>App Data</h2>
+      <p class="muted">This is the Discord-authorized control app foundation. Next step can add attachment scan/download/import buttons here.</p>
+      <pre id="output">Loading...</pre>
+    </section>
+  </main>
+  <script>
+    async function getJson(url){ const res = await fetch(url); if(!res.ok) throw new Error(await res.text()); return res.json(); }
+    async function boot(){
+      const [guilds, categories, status] = await Promise.all([getJson('/api/guilds'), getJson('/api/categories'), getJson('/api/status')]);
+      document.getElementById('guilds').innerHTML = guilds.map(g => '<option value="'+g.id+'">'+g.name+'</option>').join('');
+      document.getElementById('categories').innerHTML = categories.map(c => '<option value="'+c.key+'">'+c.emoji+' '+c.label+'</option>').join('');
+      document.getElementById('output').textContent = JSON.stringify(status, null, 2);
+    }
+    document.getElementById('loadChannels').onclick = async () => {
+      const guildId = document.getElementById('guilds').value;
+      const channels = await getJson('/api/guilds/' + guildId + '/channels');
+      document.getElementById('output').textContent = JSON.stringify(channels, null, 2);
+    };
+    boot().catch(err => document.getElementById('output').textContent = err.message);
+  </script>
+</body>
+</html>`;
+}
+
+async function exchangeDiscordCode(code, redirectUri) {
+  const body = new URLSearchParams({
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri,
+  });
+
+  const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  if (!tokenResponse.ok) {
+    throw new Error(`Discord token exchange failed: ${tokenResponse.status}`);
+  }
+
+  const token = await tokenResponse.json();
+  const userResponse = await fetch("https://discord.com/api/users/@me", {
+    headers: { Authorization: `Bearer ${token.access_token}` },
+  });
+
+  if (!userResponse.ok) {
+    throw new Error(`Discord user fetch failed: ${userResponse.status}`);
+  }
+
+  return userResponse.json();
+}
+
+function startDashboard() {
+  const app = express();
+
+  app.get("/", (req, res) => res.redirect("/dashboard"));
+  app.get("/login", (req, res) => res.send(dashboardLoginPage(req)));
+
+  app.get("/auth/discord", (req, res) => {
+    if (!CLIENT_SECRET) {
+      res.status(500).send("Missing CLIENT_SECRET or DISCORD_CLIENT_SECRET env var.");
+      return;
+    }
+
+    const state = crypto.randomBytes(16).toString("hex");
+    oauthStates.set(state, Date.now() + 10 * 60 * 1000);
+    const url = new URL("https://discord.com/api/oauth2/authorize");
+    url.searchParams.set("client_id", CLIENT_ID);
+    url.searchParams.set("redirect_uri", dashboardRedirectUri(req));
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("scope", "identify guilds");
+    url.searchParams.set("state", state);
+    res.cookie("oauth_state", state, { httpOnly: true, sameSite: "lax", maxAge: 10 * 60 * 1000 });
+    res.redirect(url.toString());
+  });
+
+  app.get("/auth/callback", async (req, res) => {
+    try {
+      const state = req.query.state;
+      const cookies = parseCookies(req.headers.cookie);
+      const stateExpiry = oauthStates.get(state);
+      oauthStates.delete(state);
+
+      if (!state || state !== cookies.oauth_state || !stateExpiry || Date.now() > stateExpiry) {
+        res.status(400).send("Bad OAuth state.");
+        return;
+      }
+
+      const user = await exchangeDiscordCode(req.query.code, dashboardRedirectUri(req));
+      if (user.id !== OWNER_ID) {
+        res.status(403).send("Denied. This dashboard is owner-only.");
+        return;
+      }
+
+      const sessionId = crypto.randomBytes(24).toString("hex");
+      dashboardSessions.set(sessionId, { user, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 });
+      res.cookie("vault_session", sessionId, { httpOnly: true, sameSite: "lax", maxAge: 7 * 24 * 60 * 60 * 1000 });
+      res.redirect("/dashboard");
+    } catch (error) {
+      console.error(error);
+      res.status(500).send("Discord authorization failed. Check CLIENT_SECRET and callback URL.");
+    }
+  });
+
+  app.get("/logout", (req, res) => {
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies.vault_session) dashboardSessions.delete(cookies.vault_session);
+    res.clearCookie("vault_session");
+    res.redirect("/login");
+  });
+
+  app.get("/dashboard", requireDashboardOwner, (req, res) => res.send(dashboardPage(req.dashboardUser)));
+
+  app.get("/api/status", requireDashboardOwner, (req, res) => {
+    res.json({
+      bot: client.user ? client.user.tag : "starting",
+      guilds: client.guilds.cache.size,
+      categories: allCategories.length,
+      leaks: countAllLeaks.get().count,
+      uptimeSeconds: Math.floor(process.uptime()),
+    });
+  });
+
+  app.get("/api/categories", requireDashboardOwner, (req, res) => {
+    res.json(allCategories.map((category) => ({
+      key: category.key,
+      label: category.label,
+      emoji: category.emoji,
+      channel: category.channel,
+      files: countLeaks.get(category.key).count,
+    })));
+  });
+
+  app.get("/api/guilds", requireDashboardOwner, (req, res) => {
+    res.json(client.guilds.cache.map((guild) => ({
+      id: guild.id,
+      name: guild.name,
+      memberCount: guild.memberCount,
+    })));
+  });
+
+  app.get("/api/guilds/:guildId/channels", requireDashboardOwner, async (req, res) => {
+    const guild = client.guilds.cache.get(req.params.guildId);
+    if (!guild) {
+      res.status(404).json({ error: "Bot is not in that server." });
+      return;
+    }
+
+    await guild.channels.fetch();
+    res.json(guild.channels.cache
+      .filter((channel) => channel.type === ChannelType.GuildText)
+      .map((channel) => ({
+        id: channel.id,
+        name: channel.name,
+        parentId: channel.parentId,
+      })));
+  });
+
+  app.listen(PORT, () => {
+    console.log(`13BPZ dashboard listening on port ${PORT}`);
+  });
 }
 
 client.once("ready", async () => {
@@ -1616,12 +2070,17 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.commandName === "modlog") return await createModLog(interaction);
       if (interaction.commandName === "cleanvaultchannels") return await cleanVaultChannels(interaction);
       if (interaction.commandName === "addleak") return await addLeak(interaction);
+      if (interaction.commandName === "sendfile") return await sendFileToChosenChannel(interaction);
       if (interaction.commandName === "vault") return await showVaultMenu(interaction, "normal");
       if (interaction.commandName === "boostervault") return await showVaultMenu(interaction, "booster");
     }
 
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("vault:")) {
       return await sendVaultFiles(interaction);
+    }
+
+    if (interaction.isChannelSelectMenu() && interaction.customId.startsWith("channelupload:")) {
+      return await handleChannelUploadSelect(interaction);
     }
 
     if (interaction.isButton() && interaction.customId === "verify:13vault") {
@@ -1649,4 +2108,5 @@ client.on("interactionCreate", async (interaction) => {
 process.on("unhandledRejection", (error) => console.error("Unhandled rejection:", error));
 process.on("uncaughtException", (error) => console.error("Uncaught exception:", error));
 
+startDashboard();
 client.login(TOKEN);
