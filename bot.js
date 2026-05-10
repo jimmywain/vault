@@ -398,6 +398,63 @@ async function lockTextChannelsExceptGeneral(guild, generalChannel, vaultRole, b
   return channels.size;
 }
 
+async function grantBotAccessToAllChannels(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only. Bot access changes are locked.")] });
+    return;
+  }
+
+  await interaction.guild.channels.fetch();
+  const botMember = interaction.guild.members.me;
+  const channels = interaction.guild.channels.cache.filter((channel) =>
+    [
+      ChannelType.GuildCategory,
+      ChannelType.GuildText,
+      ChannelType.GuildAnnouncement,
+      ChannelType.GuildForum,
+      ChannelType.GuildMedia,
+    ].includes(channel.type),
+  );
+
+  let updated = 0;
+  const failed = [];
+
+  for (const channel of channels.values()) {
+    try {
+      await channel.permissionOverwrites.edit(botMember, {
+        ViewChannel: true,
+        SendMessages: true,
+        SendMessagesInThreads: true,
+        CreatePublicThreads: true,
+        ReadMessageHistory: true,
+        AttachFiles: true,
+        EmbedLinks: true,
+        AddReactions: true,
+        UseApplicationCommands: true,
+      }, { reason: "Grant bot access to all server channels" });
+      updated += 1;
+    } catch (error) {
+      console.error(`Failed to grant bot access in #${channel.name}:`, error);
+      failed.push(`#${channel.name}: ${error.message}`);
+    }
+  }
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "Bot Access Updated",
+        [
+          `Channels updated: **${updated}**`,
+          failed.length ? `Failed: **${failed.length}**` : "Failed: **0**",
+          failed.length ? `First failures: ${failed.slice(0, 3).join(" | ")}` : null,
+        ].filter(Boolean).join("\n"),
+      ),
+    ],
+  });
+}
+
 async function addRoleIfPossible(member, roleName) {
   const role = member.guild.roles.cache.find((guildRole) => guildRole.name === roleName);
   if (!role || member.roles.cache.has(role.id)) return false;
@@ -1777,6 +1834,9 @@ function buildCommands() {
       .setName("lockchannels")
       .setDescription("Owner only: make every text channel read-only except general chat."),
     new SlashCommandBuilder()
+      .setName("botaccess")
+      .setDescription("Owner only: give the bot access to all visible server channels."),
+    new SlashCommandBuilder()
       .setName("owner")
       .setDescription("Give the Owner role to the approved owner Discord ID."),
     new SlashCommandBuilder()
@@ -2322,6 +2382,7 @@ client.on("interactionCreate", async (interaction) => {
 
       if (interaction.commandName === "setup") return await runSetup(interaction);
       if (interaction.commandName === "lockchannels") return await runLockChannels(interaction);
+      if (interaction.commandName === "botaccess") return await grantBotAccessToAllChannels(interaction);
       if (interaction.commandName === "owner") return await grantOwnerRole(interaction);
       if (interaction.commandName === "announce") return await announce(interaction);
       if (interaction.commandName === "clear") return await clearMessages(interaction);
