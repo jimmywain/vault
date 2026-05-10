@@ -178,6 +178,7 @@ const spamTracker = new Map();
 const dashboardSessions = new Map();
 const oauthStates = new Map();
 const pendingChannelUploads = new Map();
+const pendingAddLeakUploads = new Map();
 
 function brandEmbed(title, description) {
   return new EmbedBuilder()
@@ -605,9 +606,7 @@ async function downloadAttachmentFile(attachment, folderKey) {
   };
 }
 
-async function downloadAttachment(attachment, categoryKey, uploaderId) {
-  const savedFile = await downloadAttachmentFile(attachment, categoryKey);
-
+function recordLeakFile(savedFile, categoryKey, uploaderId) {
   insertLeak.run({
     category: categoryKey,
     originalName: savedFile.originalName,
@@ -618,6 +617,12 @@ async function downloadAttachment(attachment, categoryKey, uploaderId) {
     uploadedBy: uploaderId,
     createdAt: Date.now(),
   });
+}
+
+async function downloadAttachment(attachment, categoryKey, uploaderId) {
+  const savedFile = await downloadAttachmentFile(attachment, categoryKey);
+
+  recordLeakFile(savedFile, categoryKey, uploaderId);
 
   return savedFile;
 }
@@ -686,13 +691,6 @@ async function addLeak(interaction) {
     return;
   }
 
-  const categoryKey = interaction.options.getString("category", true);
-  const category = categoryByKey.get(categoryKey);
-  if (!category) {
-    await interaction.editReply({ embeds: [brandEmbed("Bad Category", "That category does not exist in the vault map.")] });
-    return;
-  }
-
   const attachments = [];
   for (let index = 1; index <= 10; index += 1) {
     const attachment = interaction.options.getAttachment(`file${index}`);
@@ -706,42 +704,110 @@ async function addLeak(interaction) {
 
   const saved = [];
   const failed = [];
+  const folderKey = path.join("pending-addleaks", interaction.guild.id);
 
   for (const attachment of attachments) {
     try {
-      saved.push(await downloadAttachment(attachment, categoryKey, interaction.user.id));
+      saved.push(await downloadAttachmentFile(attachment, folderKey));
     } catch (error) {
       console.error(error);
       failed.push(`${attachment.name}: ${error.message}`);
     }
   }
 
-  let postedText = "Posted to channel: **No**";
-  if (saved.length) {
-    const targetChannel = await findLeakPostChannel(interaction.guild, category);
-
-    if (targetChannel) {
-      const posted = await postLeaksToChannel(targetChannel, category, saved, interaction.user);
-      postedText = `Posted to channel: ${targetChannel} (**${posted.sentCount}** message${posted.sentCount === 1 ? "" : "s"})`;
-      if (posted.failedCount) postedText += `\nChannel post failures: **${posted.failedCount}** file${posted.failedCount === 1 ? "" : "s"}`;
-      if (posted.failedReasons?.length) postedText += `\nReason: ${posted.failedReasons.join(" | ")}`;
-    } else {
-      postedText = `Posted to channel: **No**\nCould not find the matching Discord channel. Run **/setup** again or check the channel name: **${category.channel}**`;
-    }
+  if (!saved.length) {
+    await interaction.editReply({
+      embeds: [brandEmbed("Upload Failed", `No files could be saved.\n${failed.slice(0, 3).join("\n")}`)],
+    });
+    return;
   }
+
+  const token = crypto.randomBytes(8).toString("hex");
+  pendingAddLeakUploads.set(token, {
+    guildId: interaction.guild.id,
+    userId: interaction.user.id,
+    files: saved,
+    failed,
+    createdAt: Date.now(),
+  });
+  setTimeout(() => pendingAddLeakUploads.delete(token), 15 * 60 * 1000).unref();
+
+  const menu = new ChannelSelectMenuBuilder()
+    .setCustomId(`addleakchannel:${token}`)
+    .setPlaceholder("Pick the vault channel for these files")
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addChannelTypes(ChannelType.GuildText);
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "Choose Vault Channel",
+        [
+          `Files ready: **${saved.length}**`,
+          failed.length ? `Failed to save: **${failed.length}**` : "Failed to save: **0**",
+          "Pick one of this server's text channels below.",
+        ].join("\n"),
+      ),
+    ],
+    components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
+
+async function handleAddLeakChannelSelect(interaction) {
+  await interaction.deferUpdate();
+
+  const token = interaction.customId.split(":")[1];
+  const session = pendingAddLeakUploads.get(token);
+  if (!session) {
+    await interaction.editReply({
+      embeds: [brandEmbed("Expired", "That upload picker expired. Run /addleak again.")],
+      components: [],
+    });
+    return;
+  }
+
+  if (session.userId !== interaction.user.id) {
+    await interaction.followUp({ ephemeral: true, embeds: [brandEmbed("Locked", "This channel picker belongs to another user.")] });
+    return;
+  }
+
+  if (session.guildId !== interaction.guild.id) {
+    await interaction.editReply({ embeds: [brandEmbed("Wrong Server", "That upload was started in another server.")], components: [] });
+    return;
+  }
+
+  const channelId = interaction.values[0];
+  const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    await interaction.editReply({ embeds: [brandEmbed("Bad Channel", "Pick a normal text channel.")], components: [] });
+    return;
+  }
+
+  const categoryKey = `channel-${channel.id}`;
+  const category = { key: categoryKey, label: channel.name, channel: channel.name, emoji: "📁" };
+  for (const file of session.files) {
+    recordLeakFile(file, categoryKey, interaction.user.id);
+  }
+
+  const posted = await postLeaksToChannel(channel, category, session.files, interaction.user);
+  pendingAddLeakUploads.delete(token);
 
   await interaction.editReply({
     embeds: [
       brandEmbed(
         "Leak Added",
         [
-          `Category: **${category.emoji} ${category.label}**`,
-          `Files saved: **${saved.length}**`,
-          postedText,
-          failed.length ? `Failed: **${failed.length}**` : "Failed: **0**",
-        ].join("\n"),
+          `Channel: ${channel}`,
+          `Files saved: **${session.files.length}**`,
+          `Posted: **${posted.sentCount}** file${posted.sentCount === 1 ? "" : "s"}`,
+          posted.failedCount ? `Channel post failures: **${posted.failedCount}**` : "Channel post failures: **0**",
+          posted.failedReasons?.length ? `Reason: ${posted.failedReasons.join(" | ")}` : null,
+          session.failed.length ? `Upload save failures: **${session.failed.length}**` : null,
+        ].filter(Boolean).join("\n"),
       ),
     ],
+    components: [],
   });
 }
 
@@ -1487,17 +1553,7 @@ async function sendVaultFiles(interaction) {
 function buildCommands() {
   const addLeakCommand = new SlashCommandBuilder()
     .setName("addleak")
-    .setDescription("Owner only: add files or videos to a vault category.")
-    .addStringOption((option) =>
-      option
-        .setName("category")
-        .setDescription("Vault category")
-        .setRequired(true)
-        .addChoices(...allCategories.map((category) => ({
-          name: `${category.emoji} ${category.label}`,
-          value: category.key,
-        }))),
-    );
+    .setDescription("Owner only: upload files, then pick an existing server channel.");
 
   for (let index = 1; index <= 10; index += 1) {
     addLeakCommand.addAttachmentOption((option) =>
@@ -2099,6 +2155,10 @@ client.on("interactionCreate", async (interaction) => {
 
     if (interaction.isChannelSelectMenu() && interaction.customId.startsWith("channelupload:")) {
       return await handleChannelUploadSelect(interaction);
+    }
+
+    if (interaction.isChannelSelectMenu() && interaction.customId.startsWith("addleakchannel:")) {
+      return await handleAddLeakChannelSelect(interaction);
     }
 
     if (interaction.isButton() && interaction.customId === "verify:13vault") {
