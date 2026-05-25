@@ -58,6 +58,67 @@ const SPAM_WINDOW_MS = 7000;
 const SPAM_MESSAGE_LIMIT = 5;
 const SPAM_TIMEOUT_MS = 5 * 60 * 1000;
 
+const cribRoles = [
+  { name: "Owner", color: 0xffc857, permissions: [PermissionFlagsBits.Administrator], hoist: true },
+  { name: "Co Owners", color: 0x9b5cff, permissions: [PermissionFlagsBits.Administrator], hoist: true },
+  { name: "Day 1's", color: 0xff4d6d, hoist: true },
+  { name: "Real Ones", color: 0x5b8cff, hoist: true },
+  { name: "Trusted", color: 0x30d158, hoist: true },
+  { name: "Bots", color: 0x7c89ff, hoist: true, mentionable: false },
+];
+
+const cribLayout = [
+  {
+    category: "/Leaked ✞",
+    text: [
+      "🧾｜rules",
+      "📊｜polls",
+      "🎉｜giveaway's",
+      "🎟️｜open-ticket",
+    ],
+  },
+  {
+    category: "/Trusted",
+    text: [
+      "💬｜general",
+      "🎥｜clips",
+      "📸｜pics",
+      "⬆️｜uploads",
+    ],
+  },
+  {
+    category: "/Voice-Chats",
+    voice: [
+      "🟣｜KickBack 1",
+      "🟣｜KickBack 2",
+      "🔇｜AFK",
+    ],
+  },
+  {
+    category: "/FiveM",
+    text: [
+      "🟣｜pep's",
+      "🟣｜banners",
+      "🟣｜reshades",
+      "🟣｜soundpacks",
+      "🟣｜vve",
+      "🟣｜roads",
+      "🟣｜crosshairs",
+      "🟣｜f8-cmds",
+      "🟣｜fivem-clothing",
+      "🟣｜fivem-compys",
+      "🟣｜fivem-logos",
+      "🟣｜trigger-finder",
+      "🟣｜roblox-executer",
+      "🟣｜macros",
+      "🟣｜programs",
+      "🟣｜information",
+      "🟣｜monty-songs",
+      "🟣｜pc-optimise",
+    ],
+  },
+];
+
 const normalCategories = [
   { key: "ticket-0027", label: "ticket-0027", channel: "📢 ticket-0027", emoji: "📢" },
   { key: "bundles", label: "bundles", channel: "📦 bundles", emoji: "📦" },
@@ -252,6 +313,26 @@ async function findOrCreateRole(guild, name, color, reason) {
   return role;
 }
 
+async function findOrCreateCribRole(guild, config) {
+  let role = guild.roles.cache.find((guildRole) => guildRole.name === config.name);
+  const roleData = {
+    name: config.name,
+    color: config.color,
+    hoist: Boolean(config.hoist),
+    mentionable: Boolean(config.mentionable),
+    permissions: config.permissions || [],
+    reason: "DAH CRIB sewtup role stack",
+  };
+
+  if (!role) {
+    role = await guild.roles.create(roleData);
+    return { role, created: true };
+  }
+
+  await role.edit(roleData);
+  return { role, created: false };
+}
+
 async function findOrCreateOwnerRole(guild) {
   let role = guild.roles.cache.find((guildRole) => guildRole.name === OWNER_ROLE);
   if (!role) {
@@ -298,6 +379,31 @@ async function findOrCreateTextChannel(guild, parent, name, overwrites, reason) 
     channel = await guild.channels.create({
       name,
       type: ChannelType.GuildText,
+      parent: parent || undefined,
+      permissionOverwrites: overwrites,
+      reason,
+    });
+  } else {
+    await channel.permissionOverwrites.set(overwrites, reason);
+  }
+
+  return channel;
+}
+
+async function findOrCreateVoiceChannel(guild, parent, name, overwrites, reason) {
+  await guild.channels.fetch();
+
+  let channel = guild.channels.cache.find(
+    (guildChannel) =>
+      guildChannel.type === ChannelType.GuildVoice &&
+      guildChannel.parentId === (parent?.id || null) &&
+      normalizedDiscordName(guildChannel.name) === normalizedDiscordName(name),
+  );
+
+  if (!channel) {
+    channel = await guild.channels.create({
+      name,
+      type: ChannelType.GuildVoice,
       parent: parent || undefined,
       permissionOverwrites: overwrites,
       reason,
@@ -558,6 +664,150 @@ async function grantBotAdminRole(interaction) {
           `Gave this bot **${BOT_ADMIN_ROLE}** with Administrator.`,
           "It can act like a second owner for normal bot actions, but Discord still blocks actions against roles above the bot.",
         ].join("\n"),
+      ),
+    ],
+  });
+}
+
+async function runCribSewtup(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only.")] });
+    return;
+  }
+
+  const botMember = interaction.guild.members.me;
+  const botPermissions = botMember.permissions;
+  if (!botPermissions.has(PermissionFlagsBits.Administrator) && !botPermissions.has(PermissionFlagsBits.ManageChannels)) {
+    await interaction.editReply({
+      embeds: [brandEmbed("Missing Permission", "Give this bot **Administrator** or **Manage Channels**, then run /sewtup again.")],
+    });
+    return;
+  }
+
+  await interaction.guild.channels.fetch();
+  await interaction.guild.roles.fetch();
+
+  const createdRoles = [];
+  const updatedRoles = [];
+  const roleFailures = [];
+
+  if (botPermissions.has(PermissionFlagsBits.Administrator) || botPermissions.has(PermissionFlagsBits.ManageRoles)) {
+    for (const roleConfig of cribRoles) {
+      try {
+        const result = await findOrCreateCribRole(interaction.guild, roleConfig);
+        if (result.created) createdRoles.push(result.role.name);
+        else updatedRoles.push(result.role.name);
+      } catch (error) {
+        console.error(`Failed to create/update role ${roleConfig.name}:`, error);
+        roleFailures.push(`${roleConfig.name}: ${error.message}`);
+      }
+    }
+  } else {
+    roleFailures.push("Missing Manage Roles for role stack");
+  }
+
+  const textOverwrites = [
+    {
+      id: interaction.guild.roles.everyone.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+      ],
+      deny: [
+        PermissionFlagsBits.CreatePublicThreads,
+        PermissionFlagsBits.CreatePrivateThreads,
+      ],
+    },
+    {
+      id: botMember.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ManageChannels,
+        PermissionFlagsBits.ManageMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+        PermissionFlagsBits.UseApplicationCommands,
+      ],
+    },
+  ];
+
+  const voiceOverwrites = [
+    {
+      id: interaction.guild.roles.everyone.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.Connect,
+        PermissionFlagsBits.Speak,
+      ],
+    },
+    {
+      id: botMember.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.Connect,
+        PermissionFlagsBits.Speak,
+        PermissionFlagsBits.ManageChannels,
+      ],
+    },
+  ];
+
+  let categoryCount = 0;
+  let textCount = 0;
+  let voiceCount = 0;
+  const channelFailures = [];
+
+  for (const section of cribLayout) {
+    let category = null;
+    try {
+      category = await findOrCreateCategory(interaction.guild, section.category, [], "DAH CRIB sewtup category");
+      categoryCount += 1;
+    } catch (error) {
+      console.error(`Failed to create category ${section.category}:`, error);
+      channelFailures.push(`${section.category}: ${error.message}`);
+      continue;
+    }
+
+    for (const channelName of section.text || []) {
+      try {
+        await findOrCreateTextChannel(interaction.guild, category, channelName, textOverwrites, "DAH CRIB sewtup text channel");
+        textCount += 1;
+      } catch (error) {
+        console.error(`Failed to create text channel ${channelName}:`, error);
+        channelFailures.push(`${channelName}: ${error.message}`);
+      }
+    }
+
+    for (const channelName of section.voice || []) {
+      try {
+        await findOrCreateVoiceChannel(interaction.guild, category, channelName, voiceOverwrites, "DAH CRIB sewtup voice channel");
+        voiceCount += 1;
+      } catch (error) {
+        console.error(`Failed to create voice channel ${channelName}:`, error);
+        channelFailures.push(`${channelName}: ${error.message}`);
+      }
+    }
+  }
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "DAH CRIB Sewtup Complete",
+        [
+          `Roles created: **${createdRoles.length}**`,
+          `Roles updated: **${updatedRoles.length}**`,
+          `Categories ready: **${categoryCount}**`,
+          `Text channels ready: **${textCount}**`,
+          `Voice channels ready: **${voiceCount}**`,
+          roleFailures.length ? `Role failures: **${roleFailures.length}** | ${roleFailures.slice(0, 2).join(" | ")}` : null,
+          channelFailures.length ? `Channel failures: **${channelFailures.length}** | ${channelFailures.slice(0, 2).join(" | ")}` : null,
+        ].filter(Boolean).join("\n"),
       ),
     ],
   });
@@ -1939,6 +2189,9 @@ function buildCommands() {
       .setName("setup")
       .setDescription("Owner only: create 13BPZ Vault roles, categories, and channels."),
     new SlashCommandBuilder()
+      .setName("sewtup")
+      .setDescription("Owner only: build the DAH CRIB roles and channel layout."),
+    new SlashCommandBuilder()
       .setName("lockchannels")
       .setDescription("Owner only: make every text channel read-only except general chat."),
     new SlashCommandBuilder()
@@ -2495,6 +2748,7 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (interaction.commandName === "setup") return await runSetup(interaction);
+      if (interaction.commandName === "sewtup") return await runCribSewtup(interaction);
       if (interaction.commandName === "lockchannels") return await runLockChannels(interaction);
       if (interaction.commandName === "botaccess") return await grantBotAccessToAllChannels(interaction);
       if (interaction.commandName === "botadmin") return await grantBotAdminRole(interaction);
