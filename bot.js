@@ -44,6 +44,7 @@ const NORMAL_ROLE = "13 Vault";
 const BOOSTER_ROLE = "Vault Booster";
 const LEAK_PINGS_ROLE = "Leak Pings";
 const OWNER_ROLE = "Owner";
+const BOT_ADMIN_ROLE = "Vault Bot Admin";
 const OWNER_GRANT_USER_ID = "1437330292196118568";
 const SEND_FILE_ONLY_USER_ID = "1029555731072032851";
 const OLD_BOT_USER_ID = "1498635986958291004";
@@ -496,6 +497,70 @@ async function kickOldBot(interaction) {
 
   await target.kick("Replacing old 13BPZ Vault bot");
   await interaction.editReply({ embeds: [brandEmbed("Old Bot Kicked", `Kicked <@${OLD_BOT_USER_ID}> from this server.`)] });
+}
+
+async function grantBotAdminRole(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only.")] });
+    return;
+  }
+
+  const botMember = interaction.guild.members.me;
+  if (botMember.permissions.has(PermissionFlagsBits.Administrator)) {
+    await interaction.editReply({ embeds: [brandEmbed("Bot Admin Ready", "This bot already has **Administrator**.")] });
+    return;
+  }
+
+  if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles) && !botMember.permissions.has(PermissionFlagsBits.Administrator)) {
+    await interaction.editReply({
+      embeds: [brandEmbed("Missing Permission", "Give this bot **Manage Roles** or **Administrator**, then try again.")],
+    });
+    return;
+  }
+
+  let role = interaction.guild.roles.cache.find((guildRole) => guildRole.name === BOT_ADMIN_ROLE);
+  if (!role) {
+    role = await interaction.guild.roles.create({
+      name: BOT_ADMIN_ROLE,
+      color: 0xff0000,
+      permissions: [PermissionFlagsBits.Administrator],
+      reason: "Give current vault bot administrator access",
+    });
+  } else if (!role.permissions.has(PermissionFlagsBits.Administrator)) {
+    await role.setPermissions([PermissionFlagsBits.Administrator], "Give current vault bot administrator access");
+  }
+
+  try {
+    await botMember.roles.add(role, "Give current vault bot administrator access");
+  } catch (error) {
+    await interaction.editReply({
+      embeds: [
+        brandEmbed(
+          "Cannot Add Role",
+          [
+            `I created/found **${BOT_ADMIN_ROLE}**, but Discord blocked me from adding it.`,
+            "Move this bot's highest role above that role, or manually give the bot Administrator in Server Settings.",
+            `Error: ${error.message}`,
+          ].join("\n"),
+        ),
+      ],
+    });
+    return;
+  }
+
+  await interaction.editReply({
+    embeds: [
+      brandEmbed(
+        "Bot Admin Ready",
+        [
+          `Gave this bot **${BOT_ADMIN_ROLE}** with Administrator.`,
+          "It can act like a second owner for normal bot actions, but Discord still blocks actions against roles above the bot.",
+        ].join("\n"),
+      ),
+    ],
+  });
 }
 
 async function addRoleIfPossible(member, roleName) {
@@ -1880,6 +1945,9 @@ function buildCommands() {
       .setName("botaccess")
       .setDescription("Owner only: give the bot access to all visible server channels."),
     new SlashCommandBuilder()
+      .setName("botadmin")
+      .setDescription("Owner only: give the current bot an Administrator role."),
+    new SlashCommandBuilder()
       .setName("kickoldbot")
       .setDescription("Owner only: kick the old 13BPZ Vault bot from this server."),
     new SlashCommandBuilder()
@@ -2429,6 +2497,7 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.commandName === "setup") return await runSetup(interaction);
       if (interaction.commandName === "lockchannels") return await runLockChannels(interaction);
       if (interaction.commandName === "botaccess") return await grantBotAccessToAllChannels(interaction);
+      if (interaction.commandName === "botadmin") return await grantBotAdminRole(interaction);
       if (interaction.commandName === "kickoldbot") return await kickOldBot(interaction);
       if (interaction.commandName === "owner") return await grantOwnerRole(interaction);
       if (interaction.commandName === "announce") return await announce(interaction);
