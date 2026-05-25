@@ -2383,8 +2383,9 @@ function buildCommands() {
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   const commands = buildCommands();
-  const visibleGuildIds = client.guilds.cache.map((guild) => guild.id);
-  const targetGuildIds = [...new Set([...GUILD_IDS, ...visibleGuildIds])];
+  const targetGuildIds = GUILD_IDS.length
+    ? GUILD_IDS
+    : client.guilds.cache.map((guild) => guild.id);
 
   if (targetGuildIds.length) {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
