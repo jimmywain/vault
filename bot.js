@@ -45,6 +45,7 @@ const BOOSTER_ROLE = "Vault Booster";
 const LEAK_PINGS_ROLE = "Leak Pings";
 const OWNER_ROLE = "Owner";
 const BOT_ADMIN_ROLE = "Vault Bot Admin";
+const TRUSTED_ROLE = "Trusted";
 const OWNER_GRANT_USER_ID = "1437330292196118568";
 const SEND_FILE_ONLY_USER_ID = "1029555731072032851";
 const OLD_BOT_USER_ID = "1498635986958291004";
@@ -63,7 +64,7 @@ const cribRoles = [
   { name: "Co Owners", color: 0x2f80ff, permissions: [PermissionFlagsBits.Administrator], hoist: true },
   { name: "Day 1's", color: 0xff4d6d, hoist: true },
   { name: "Real Ones", color: 0x5b8cff, hoist: true },
-  { name: "Trusted", color: 0x30d158, hoist: true },
+  { name: TRUSTED_ROLE, color: 0x30d158, hoist: true },
   { name: "Bots", color: 0x3b9dff, hoist: true, mentionable: false },
 ];
 
@@ -810,6 +811,50 @@ async function runCribSewtup(interaction) {
     },
   ];
 
+  const ownerRole = interaction.guild.roles.cache.find((role) => role.name === OWNER_ROLE);
+  const fiveMTextOverwrites = [
+    {
+      id: interaction.guild.roles.everyone.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.ReadMessageHistory,
+      ],
+      deny: [
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.SendMessagesInThreads,
+        PermissionFlagsBits.CreatePublicThreads,
+        PermissionFlagsBits.CreatePrivateThreads,
+        PermissionFlagsBits.AddReactions,
+      ],
+    },
+    ownerRole ? {
+      id: ownerRole.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.SendMessagesInThreads,
+        PermissionFlagsBits.CreatePublicThreads,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+      ],
+    } : null,
+    {
+      id: botMember.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.SendMessagesInThreads,
+        PermissionFlagsBits.ManageChannels,
+        PermissionFlagsBits.ManageMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+        PermissionFlagsBits.UseApplicationCommands,
+      ],
+    },
+  ].filter(Boolean);
+
   let categoryCount = 0;
   let textCount = 0;
   let voiceCount = 0;
@@ -828,7 +873,8 @@ async function runCribSewtup(interaction) {
 
     for (const channelName of section.text || []) {
       try {
-        await findOrCreateCribTextChannel(interaction.guild, category, channelName, textOverwrites, "DAH CRIB sewtup text channel");
+        const overwrites = section.category === "/FiveM" ? fiveMTextOverwrites : textOverwrites;
+        await findOrCreateCribTextChannel(interaction.guild, category, channelName, overwrites, "DAH CRIB sewtup text channel");
         textCount += 1;
       } catch (error) {
         console.error(`Failed to create text channel ${channelName}:`, error);
@@ -2756,12 +2802,13 @@ client.once("ready", async () => {
 client.on("guildMemberAdd", async (member) => {
   try {
     await addRoleIfPossible(member, NORMAL_ROLE);
+    await addRoleIfPossible(member, TRUSTED_ROLE);
     if (member.premiumSince) await addRoleIfPossible(member, BOOSTER_ROLE);
     await postToGeneral(
       member.guild,
       brandEmbed(
         "New Vault Member",
-        `${member} entered **13BPZ Vault** and received **${NORMAL_ROLE}**.`,
+        `${member} entered and received **${TRUSTED_ROLE}**.`,
       ),
     );
   } catch (error) {
