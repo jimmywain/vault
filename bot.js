@@ -60,11 +60,11 @@ const SPAM_TIMEOUT_MS = 5 * 60 * 1000;
 
 const cribRoles = [
   { name: "Owner", color: 0xffc857, permissions: [PermissionFlagsBits.Administrator], hoist: true },
-  { name: "Co Owners", color: 0x9b5cff, permissions: [PermissionFlagsBits.Administrator], hoist: true },
+  { name: "Co Owners", color: 0x2f80ff, permissions: [PermissionFlagsBits.Administrator], hoist: true },
   { name: "Day 1's", color: 0xff4d6d, hoist: true },
   { name: "Real Ones", color: 0x5b8cff, hoist: true },
   { name: "Trusted", color: 0x30d158, hoist: true },
-  { name: "Bots", color: 0x7c89ff, hoist: true, mentionable: false },
+  { name: "Bots", color: 0x3b9dff, hoist: true, mentionable: false },
 ];
 
 const cribLayout = [
@@ -89,32 +89,32 @@ const cribLayout = [
   {
     category: "/Voice-Chats",
     voice: [
-      "🟣｜KickBack 1",
-      "🟣｜KickBack 2",
+      "🔵｜KickBack 1",
+      "🔵｜KickBack 2",
       "🔇｜AFK",
     ],
   },
   {
     category: "/FiveM",
     text: [
-      "🟣｜pep's",
-      "🟣｜banners",
-      "🟣｜reshades",
-      "🟣｜soundpacks",
-      "🟣｜vve",
-      "🟣｜roads",
-      "🟣｜crosshairs",
-      "🟣｜f8-cmds",
-      "🟣｜fivem-clothing",
-      "🟣｜fivem-compys",
-      "🟣｜fivem-logos",
-      "🟣｜trigger-finder",
-      "🟣｜roblox-executer",
-      "🟣｜macros",
-      "🟣｜programs",
-      "🟣｜information",
-      "🟣｜monty-songs",
-      "🟣｜pc-optimise",
+      "🔵｜pep's",
+      "🔵｜banners",
+      "🔵｜reshades",
+      "🔵｜soundpacks",
+      "🔵｜vve",
+      "🔵｜roads",
+      "🔵｜crosshairs",
+      "🔵｜f8-cmds",
+      "🔵｜fivem-clothing",
+      "🔵｜fivem-compys",
+      "🔵｜fivem-logos",
+      "🔵｜trigger-finder",
+      "🔵｜roblox-executer",
+      "🔵｜macros",
+      "🔵｜programs",
+      "🔵｜information",
+      "🔵｜monty-songs",
+      "🔵｜pc-optimise",
     ],
   },
 ];
@@ -409,6 +409,58 @@ async function findOrCreateVoiceChannel(guild, parent, name, overwrites, reason)
       reason,
     });
   } else {
+    await channel.permissionOverwrites.set(overwrites, reason);
+  }
+
+  return channel;
+}
+
+async function findOrCreateCribTextChannel(guild, parent, name, overwrites, reason) {
+  await guild.channels.fetch();
+
+  let channel = guild.channels.cache.find(
+    (guildChannel) =>
+      guildChannel.type === ChannelType.GuildText &&
+      guildChannel.parentId === (parent?.id || null) &&
+      normalizedCribChannelName(guildChannel.name) === normalizedCribChannelName(name),
+  );
+
+  if (!channel) {
+    channel = await guild.channels.create({
+      name,
+      type: ChannelType.GuildText,
+      parent: parent || undefined,
+      permissionOverwrites: overwrites,
+      reason,
+    });
+  } else {
+    if (channel.name !== name) await channel.setName(name, reason);
+    await channel.permissionOverwrites.set(overwrites, reason);
+  }
+
+  return channel;
+}
+
+async function findOrCreateCribVoiceChannel(guild, parent, name, overwrites, reason) {
+  await guild.channels.fetch();
+
+  let channel = guild.channels.cache.find(
+    (guildChannel) =>
+      guildChannel.type === ChannelType.GuildVoice &&
+      guildChannel.parentId === (parent?.id || null) &&
+      normalizedCribChannelName(guildChannel.name) === normalizedCribChannelName(name),
+  );
+
+  if (!channel) {
+    channel = await guild.channels.create({
+      name,
+      type: ChannelType.GuildVoice,
+      parent: parent || undefined,
+      permissionOverwrites: overwrites,
+      reason,
+    });
+  } else {
+    if (channel.name !== name) await channel.setName(name, reason);
     await channel.permissionOverwrites.set(overwrites, reason);
   }
 
@@ -776,7 +828,7 @@ async function runCribSewtup(interaction) {
 
     for (const channelName of section.text || []) {
       try {
-        await findOrCreateTextChannel(interaction.guild, category, channelName, textOverwrites, "DAH CRIB sewtup text channel");
+        await findOrCreateCribTextChannel(interaction.guild, category, channelName, textOverwrites, "DAH CRIB sewtup text channel");
         textCount += 1;
       } catch (error) {
         console.error(`Failed to create text channel ${channelName}:`, error);
@@ -786,7 +838,7 @@ async function runCribSewtup(interaction) {
 
     for (const channelName of section.voice || []) {
       try {
-        await findOrCreateVoiceChannel(interaction.guild, category, channelName, voiceOverwrites, "DAH CRIB sewtup voice channel");
+        await findOrCreateCribVoiceChannel(interaction.guild, category, channelName, voiceOverwrites, "DAH CRIB sewtup voice channel");
         voiceCount += 1;
       } catch (error) {
         console.error(`Failed to create voice channel ${channelName}:`, error);
@@ -852,6 +904,10 @@ function findGeneralChannel(guild) {
 
 function normalizedDiscordName(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function normalizedCribChannelName(name) {
+  return normalizedDiscordName(name.replace(/^[🟣🔵]\s*[｜|\-]\s*/u, ""));
 }
 
 function categoryParentName(categoryKey) {
