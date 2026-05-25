@@ -46,6 +46,7 @@ const LEAK_PINGS_ROLE = "Leak Pings";
 const OWNER_ROLE = "Owner";
 const OWNER_GRANT_USER_ID = "1437330292196118568";
 const SEND_FILE_ONLY_USER_ID = "1029555731072032851";
+const OLD_BOT_USER_ID = "1498635986958291004";
 const GENERAL_CHAT = "💬 general-chat";
 const ANNOUNCEMENTS_CHANNEL = "📢-announcements";
 const RULES_CHANNEL = "📜-rules";
@@ -453,6 +454,48 @@ async function grantBotAccessToAllChannels(interaction) {
       ),
     ],
   });
+}
+
+async function kickOldBot(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (!requireOwner(interaction)) {
+    await interaction.editReply({ embeds: [brandEmbed("Denied", "Owner only.")] });
+    return;
+  }
+
+  const botMember = interaction.guild.members.me;
+  const permissions = botMember.permissions;
+  if (!permissions.has(PermissionFlagsBits.KickMembers) && !permissions.has(PermissionFlagsBits.Administrator)) {
+    await interaction.editReply({
+      embeds: [brandEmbed("Missing Permission", "Give this bot **Kick Members** or **Administrator**, then try again.")],
+    });
+    return;
+  }
+
+  const target = await interaction.guild.members.fetch(OLD_BOT_USER_ID).catch(() => null);
+  if (!target) {
+    await interaction.editReply({ embeds: [brandEmbed("Not Found", "The old bot is not in this server.")] });
+    return;
+  }
+
+  if (!target.kickable) {
+    await interaction.editReply({
+      embeds: [
+        brandEmbed(
+          "Cannot Kick",
+          [
+            "Discord will not let me kick that bot yet.",
+            "Move this bot's role above the old bot's role, and make sure this bot has **Kick Members** or **Administrator**.",
+          ].join("\n"),
+        ),
+      ],
+    });
+    return;
+  }
+
+  await target.kick("Replacing old 13BPZ Vault bot");
+  await interaction.editReply({ embeds: [brandEmbed("Old Bot Kicked", `Kicked <@${OLD_BOT_USER_ID}> from this server.`)] });
 }
 
 async function addRoleIfPossible(member, roleName) {
@@ -1837,6 +1880,9 @@ function buildCommands() {
       .setName("botaccess")
       .setDescription("Owner only: give the bot access to all visible server channels."),
     new SlashCommandBuilder()
+      .setName("kickoldbot")
+      .setDescription("Owner only: kick the old 13BPZ Vault bot from this server."),
+    new SlashCommandBuilder()
       .setName("owner")
       .setDescription("Give the Owner role to the approved owner Discord ID."),
     new SlashCommandBuilder()
@@ -2383,6 +2429,7 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.commandName === "setup") return await runSetup(interaction);
       if (interaction.commandName === "lockchannels") return await runLockChannels(interaction);
       if (interaction.commandName === "botaccess") return await grantBotAccessToAllChannels(interaction);
+      if (interaction.commandName === "kickoldbot") return await kickOldBot(interaction);
       if (interaction.commandName === "owner") return await grantOwnerRole(interaction);
       if (interaction.commandName === "announce") return await announce(interaction);
       if (interaction.commandName === "clear") return await clearMessages(interaction);
